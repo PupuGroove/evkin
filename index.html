@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f3f7fa" />
+  <title>Diocode v.1.5</title>
+  <link rel="stylesheet" href="assets/css/style.css?v=20260901-sheet-clarity-v2" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-text">
+          <div class="brand-title">Diocode</div>
+          <div class="brand-ver">Diocode v.2</div>
+        </div>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="sidebar-foot">
+        <p class="brand-sub">copyright @ Dio Fajrul Iman - dit. PSNK</p>
+      </div>
+    </aside>
+
+    <button id="sidebarBackdrop" class="sidebar-backdrop" type="button" aria-label="Tutup menu"></button>
+
+    <main class="content">
+      <header class="topbar">
+        <button id="sidebarToggle" class="icon-btn" title="Menu"><i data-lucide="menu"></i></button>
+        <div class="topbar-title">
+          <h1 id="topbarPageTitle">Dashboard</h1>
+          <p id="topbarPageSubtitle">Ringkasan pengolahan absensi dan Tukin</p>
+        </div>
+
+        <div class="topbar-period" title="Periode aktif">
+          <i data-lucide="calendar-days"></i>
+          <span id="topbarPeriod">Periode belum dipilih</span>
+        </div>
+        <div class="backend-control">
+          <span id="backendStatus" class="pill gray">Backend mati</span>
+          <button id="backendToggle" class="btn btn-secondary btn-sm" type="button" title="Hubungkan ke backend Python lokal">
+            <i data-lucide="power"></i> Aktifkan Backend
+          </button>
+        </div>
+        <div class="topbar-actions">
+          <button id="notificationButton" class="icon-btn notification-button" type="button" title="Perlu perhatian" aria-label="Buka ringkasan perhatian">
+            <i data-lucide="bell"></i><span id="notificationDot" class="notification-dot hidden"></span>
+          </button>
+          <details id="profileMenu" class="profile-menu">
+            <summary class="profile-trigger" aria-label="Menu EVKIN"><span>EV</span><i data-lucide="chevron-down"></i></summary>
+            <div class="profile-popover">
+              <div class="profile-heading"><strong>EVKIN</strong><small>Evkin Tools Diocode v.1.5</small></div>
+              <button type="button" data-topbar-go="master-pengembalian"><i data-lucide="refresh-cw"></i> Master Pengembalian</button>
+              <button type="button" data-topbar-go="reconcile"><i data-lucide="scale"></i> Rekonsiliasi</button>
+              <button type="button" data-topbar-go="audit-viewer"><i data-lucide="activity"></i> Audit Log</button>
+              <div class="profile-divider"></div>
+              <button type="button" id="topbarDbReset"><i data-lucide="database"></i> Reset Cache &amp; Hasil Workflow</button>
+              <button type="button" id="topbarResetAll" class="profile-danger"><i data-lucide="trash-2"></i> Reset Hasil Workflow</button>
+              <button type="button" id="topbarTotalReset" class="profile-danger"><i data-lucide="trash-2"></i> Reset Total (Tanpa Master SDM)</button>
+            </div>
+          </details>
+        </div>
+      </header>
+      <div id="stepper" class="stepper"></div>
+      <div id="main" class="main"></div>
+    </main>
+  </div>
+  <div id="toasts" class="toasts"></div>
+
+  <script src="assets/vendor/xlsx.full.min.js"></script>
+  <script src="assets/vendor/lucide.min.js"></script>
+  <script src="assets/js/utils.js"></script>
+  <script src="assets/js/data.js"></script>
+  <script src="assets/js/state.js"></script>
+  <script src="assets/js/calc.js"></script>  <!-- Note: export-worker.js is loaded dynamically by export.js via Web Worker API -->  <script src="assets/js/import.js"></script>
+  <script src="assets/js/import-wali.js"></script>
+  <script src="assets/js/import-advanced.js"></script>
+  <script src="assets/js/config.js"></script>
+  <script src="assets/js/shared-master.js?v=20260901-master-governance-v2"></script>
+  <script src="assets/js/harian.js"></script>
+  <script src="assets/js/rekap.js"></script>
+  <script src="assets/js/semifinal.js"></script>
+  <script src="assets/js/final.js"></script>
+  <script src="assets/js/final-tukin.js"></script>
+  <script src="assets/js/reconcile.js"></script>
+  <script src="assets/js/audit.js"></script>
+  <script src="assets/js/audit-viewer.js"></script>
+  <script src="assets/js/evkin-db.js"></script>
+  <script src="assets/js/export-backend.js?v=20260831-aurora-precision"></script>
+  <script src="assets/js/export.js"></script>
+  <script src="assets/js/master-pengembalian.js"></script>
+  <script src="assets/js/master-pengembalian-additions.js"></script>
+  <script src="assets/js/master-pengembalian-monthly.js"></script>
+  <script src="assets/js/dashboard.js?v=20260831-aurora-precision-v2"></script>
+  <script src="assets/js/pembulatan.js"></script>
+  <script src="assets/js/skp-assessment.js?v=20260901-third-skp-unpaid-v1"></script>
+  <script src="assets/js/tukin-annual.js?v=20260901-hukdis-governance-v1"></script>
+  <script src="assets/js/app.js?v=20260831-nebula-executive"></script>
+</body>
+</html>

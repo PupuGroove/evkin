@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aplikasi Rekonsiliasi Pembulatan Tukin Dio</title>
+<style>
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:#f3f6f9;margin:0;color:#172033}
+.wrap{max-width:1200px;margin:auto;padding:20px}.card{background:white;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 2px 12px #0001}
+h1{margin:0 0 6px;font-size:25px}.muted{color:#687386}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+label{font-weight:700;font-size:13px}input,select,button{width:100%;padding:10px;margin-top:6px;border:1px solid #ccd3dd;border-radius:8px}
+button{background:#172033;color:white;border:0;font-weight:700;cursor:pointer}.secondary{background:#526071}.success{background:#087f5b}.danger{background:#b42318}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.stat{background:#f8fafc;border:1px solid #e2e8f0;padding:13px;border-radius:10px}.stat b{display:block;font-size:18px;margin-top:5px}
+.ok{color:#087f5b;font-weight:700}.bad{color:#b42318;font-weight:700}.tablewrap{overflow:auto;max-height:520px}
+table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;border-bottom:1px solid #e5e7eb;white-space:nowrap;text-align:right}th:first-child,td:first-child{text-align:left}
+.note{font-size:12px;background:#f8fafc;padding:10px;border-radius:8px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+<h1>Rekonsiliasi Pembulatan Tukin @dio</h1>
+<div class="muted">Import Excel BNBA, bulatkan nominal, distribusikan selisih secara otomatis, dan pastikan total akhir tetap sama dengan total sumber.</div>
+</div>
+
+<div class="card">
+<h3>1. Import Data BNBA</h3>
+<input type="file" id="file" accept=".xlsx,.xls" onchange="loadExcel(event)">
+<div id="info" class="muted" style="margin-top:8px"></div>
+<div class="grid" style="margin-top:12px">
+<div><label>Kolom Nominal Tukin</label><select id="valueCol" multiple size="5" style="min-height:120px"></select></div>
+<div><label>Kelipatan Pembulatan</label><select id="unit"><option value="1">Rp1</option><option value="10">Rp10</option><option value="100">Rp100</option><option value="1000" selected>Rp1.000</option><option value="10000">Rp10.000</option><option value="100000">Rp100.000</option></select></div>
+<div><label>Metode</label><select id="method"><option value="nearest">Terdekat</option><option value="floor">Ke bawah</option><option value="ceil">Ke atas</option></select></div>
+</div>
+<div class="grid" style="margin-top:12px">
+<button onclick="process()">PROSES REKONSILIASI</button>
+<button class="success" onclick="download()">DOWNLOAD BNBA FINAL (.XLSX)</button>
+</div>
+<div class="note"><b>Catatan:</b> seluruh nominal Tukin/BNBA diproses sebagai <b>rupiah bulat tanpa desimal</b>. Jika sumber memiliki desimal, sistem membulatkan ke rupiah terdekat terlebih dahulu.<br><b>Aturan:</b> seluruh kolom asli tetap dipertahankan. Sistem menambahkan kolom Pembulatan Awal, Koreksi Rekonsiliasi, Tukin Final, dan Status. Koreksi dilakukan agar <b>Total Tukin Final − Total Tukin Awal = Rp0</b>.</div>
+</div>
+
+<div class="card">
+<h3>2. Kontrol Rekonsiliasi</h3>
+<div class="stats">
+<div class="stat">Total Tukin Awal<b id="awal">Rp0</b></div>
+<div class="stat">Total Pembulatan Awal<b id="bulat">Rp0</b></div>
+<div class="stat">Total Koreksi<b id="koreksi">Rp0</b></div>
+<div class="stat">Total Tukin Final<b id="final">Rp0</b></div>
+<div class="stat">SELISIH<b id="selisih">Rp0</b></div>
+</div>
+<p id="status"></p>
+</div>
+
+<div class="card">
+<h3>3. Preview BNBA</h3>
+<div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+let headers=[], rows=[], result=[], fileBase="BNBA";
+
+const rp=n=>new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(n);
+function num(v){
+ if(v===null||v===undefined||v==="")return 0;
+ if(typeof v==="number")return v;
+ let s=String(v).trim().replace(/Rp/gi,"").replace(/\\s/g,"");
+ if(s.includes(".")&&s.includes(","))s=s.replace(/\\./g,"").replace(",",".");
+ else if(/^\\d{1,3}(\\.\\d{3})+$/.test(s))s=s.replace(/\\./g,"");
+ else if(s.includes(","))s=s.replace(",",".");
+ return Number(s)||0;
+}
+function loadExcel(e){
+ const f=e.target.files[0]; if(!f)return;
+ fileBase=f.name.replace(/\\.(xlsx|xls)$/i,"");
+ const reader=new FileReader();
+ reader.onload=ev=>{
+   const wb=XLSX.read(new Uint8Array(ev.target.result),{type:"array"});
+   const ws=wb.Sheets[wb.SheetNames[0]];
+   const data=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+   if(data.length<2){alert("File Excel kosong atau tidak memiliki data.");return}
+   headers=data[0].map(x=>String(x));
+   rows=data.slice(1);
+   document.getElementById("info").textContent=`${f.name} | Sheet: ${wb.SheetNames[0]} | ${rows.length.toLocaleString('id-ID')} baris`;
+   const sel=document.getElementById("valueCol"); sel.innerHTML="";
+   const preselected=[];
+   headers.forEach((h,i)=>{
+     const o=document.createElement("option");
+     o.value=i;
+     o.textContent=h;
+     if(/tukin|nominal|jumlah|dibayar|nilai|pembayaran/i.test(h)){
+       o.selected=true;
+       preselected.push(i);
+     }
+     sel.appendChild(o);
+   });
+   if(!preselected.length && headers.length){
+     sel.options[headers.length-1].selected=true;
+   }
+   sel.size=Math.min(Math.max(4, headers.length), 12);
+ };
+ reader.readAsArrayBuffer(f);
+}
+function roundVal(v,u,m){
+ const q=v/u;
+ if(m==="floor")return Math.floor(q)*u;
+ if(m==="ceil")return Math.ceil(q)*u;
+ return Math.round(q)*u;
+}
+function getSelectedIndexes(){
+ const sel=document.getElementById("valueCol");
+ const selected=[...sel.selectedOptions].map(opt=>Number(opt.value));
+ return selected.length ? selected : [Number(sel.value)];
+}
+function process(){
+ if(!rows.length){alert("Import file Excel terlebih dahulu.");return}
+ const selectedIndexes=getSelectedIndexes();
+ const unit=Number(document.getElementById("unit").value);
+ const method=document.getElementById("method").value;
+ let workingRows=rows.map(r=>({ ...r }));
+ let totals={total:0,initial:0,correction:0,final:0};
+
+ selectedIndexes.forEach((idx)=>{
+   const header=headers[idx];
+   const columnResult=workingRows.map((r,i)=>{
+     const original=Math.round(num(r[idx]));
+     const rounded=Math.round(roundVal(original,unit,method));
+     return {no:i+1,raw:[...r],original,rounded,correction:0,final:rounded,fraction:(original/unit)-Math.floor(original/unit)};
+   });
+
+   const total=columnResult.reduce((a,x)=>a+x.original,0);
+   const initial=columnResult.reduce((a,x)=>a+x.rounded,0);
+   let residual=Math.round((total-initial)*100)/100;
+   let steps=Math.round(residual/unit);
+
+   if(Math.abs(residual-steps*unit)<0.01 && columnResult.length){
+     if(steps>0){
+       [...columnResult].sort((a,b)=>b.fraction-a.fraction).forEach((x,j)=>{if(j<steps)x.correction+=unit});
+       for(let j=columnResult.length;j<steps;j++)columnResult[j%columnResult.length].correction+=unit;
+     } else if(steps<0){
+       const n=Math.abs(steps);
+       [...columnResult].sort((a,b)=>a.fraction-b.fraction).forEach((x,j)=>{if(j<n)x.correction-=unit});
+       for(let j=columnResult.length;j<n;j++)columnResult[j%columnResult.length].correction-=unit;
+     }
+   }
+   columnResult.forEach(x=>x.final=x.rounded+x.correction);
+   let ft=columnResult.reduce((a,x)=>a+x.final,0);
+   let d=Math.round(total-ft);
+   if(d!==0 && columnResult.length){
+     columnResult[columnResult.length-1].correction+=d;
+     columnResult[columnResult.length-1].final+=d;
+   }
+   columnResult.forEach(x=>{x.original=Math.round(x.original);x.rounded=Math.round(x.rounded);x.correction=Math.round(x.correction);x.final=Math.round(x.final);});
+
+   columnResult.forEach(item=>{
+     const row=workingRows[item.no-1];
+     row[`${header}_Pembulatan_Awal`]=item.rounded;
+     row[`${header}_Koreksi_Rekonsiliasi`]=item.correction;
+     row[`${header}_Tukin_Final`]=item.final;
+     row[`${header}_Status_Rekonsiliasi`]=Math.abs(item.final-item.original)<0.01?"Sama":"Dikoreksi";
+   });
+
+   totals.total+=total;
+   totals.initial+=initial;
+   totals.correction+=columnResult.reduce((a,x)=>a+x.correction,0);
+   totals.final+=columnResult.reduce((a,x)=>a+x.final,0);
+ });
+
+ result=workingRows;
+ const diff=Math.round(totals.final-totals.total);
+ render(totals.total,totals.initial,totals.correction,totals.final,diff);
+}
+function render(total,initial,correction,final,diff){
+ document.getElementById("awal").textContent=rp(total);
+ document.getElementById("bulat").textContent=rp(initial);
+ document.getElementById("koreksi").textContent=(correction>=0?"+":"")+rp(correction);
+ document.getElementById("final").textContent=rp(final);
+ document.getElementById("selisih").textContent=rp(diff);
+ const st=document.getElementById("status");
+ st.className=Math.abs(diff)<0.01?"ok":"bad";
+ st.textContent=Math.abs(diff)<0.01?"✓ REKONSILIASI VALID — Total awal dan total final sama persis.":"⚠ REKONSILIASI BELUM 0 — periksa data.";
+
+ const selectedIndexes=getSelectedIndexes();
+ const outHeaders=[...headers];
+ selectedIndexes.forEach(idx=>{
+   const header=headers[idx];
+   outHeaders.push(`${header}_Pembulatan_Awal`, `${header}_Koreksi_Rekonsiliasi`, `${header}_Tukin_Final`, `${header}_Status_Rekonsiliasi`);
+ });
+
+ document.getElementById("thead").innerHTML="<tr>"+outHeaders.map(h=>"<th>"+esc(h)+"</th>").join("")+"</tr>";
+ document.getElementById("tbody").innerHTML=result.slice(0,1000).map(row=>{
+   const vals=[];
+   headers.forEach(h=>vals.push(row[h] ?? ""));
+   selectedIndexes.forEach(idx=>{
+     const header=headers[idx];
+     vals.push(row[`${header}_Pembulatan_Awal`] ?? "");
+     vals.push(row[`${header}_Koreksi_Rekonsiliasi`] ?? "");
+     vals.push(row[`${header}_Tukin_Final`] ?? "");
+     vals.push(row[`${header}_Status_Rekonsiliasi`] ?? "");
+   });
+   return "<tr>"+vals.map(v=>"<td>"+(typeof v==="number"?rp(v):esc(v))+"</td>").join("")+"</tr>";
+ }).join("");
+}
+function esc(s){return String(s??"").replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]))}
+function download(){
+ if(!result.length){alert("Proses rekonsiliasi terlebih dahulu.");return}
+ const selectedIndexes=getSelectedIndexes();
+ const outHeaders=[...headers];
+ selectedIndexes.forEach(idx=>{
+   const header=headers[idx];
+   outHeaders.push(`${header}_Pembulatan_Awal`, `${header}_Koreksi_Rekonsiliasi`, `${header}_Tukin_Final`, `${header}_Status_Rekonsiliasi`);
+ });
+ const out=[outHeaders];
+ result.forEach(row=>{
+   const vals=[];
+   headers.forEach(h=>vals.push(row[h] ?? ""));
+   selectedIndexes.forEach(idx=>{
+     const header=headers[idx];
+     vals.push(row[`${header}_Pembulatan_Awal`] ?? "");
+     vals.push(row[`${header}_Koreksi_Rekonsiliasi`] ?? "");
+     vals.push(row[`${header}_Tukin_Final`] ?? "");
+     vals.push(row[`${header}_Status_Rekonsiliasi`] ?? "");
+   });
+   out.push(vals);
+ });
+ const ws=XLSX.utils.aoa_to_sheet(out);
+ ws["!freeze"]={xSplit:0,ySplit:1};
+ const wb=XLSX.utils.book_new();
+ XLSX.utils.book_append_sheet(wb,ws,"BNBA Final");
+ XLSX.writeFile(wb,fileBase+"_REKONSILIASI_FINAL.xlsx");
+}
+</script>
+</body>
+</html>

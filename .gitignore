@@ -1,0 +1,86 @@
+# Runtime databases and database sidecars
+*.duckdb
+*.duckdb.*
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.wal
+*.shm
+*.journal
+*.schema.lock
+*.server.lock
+
+# EVKIN runtime data, backups, exports, and generated output
+/backend/data/
+/backend/exports/
+/outputs/
+/output/
+/exports/
+/export/
+
+# Known data-bearing workbooks (not templates)
+/examples/master_pengembalian/FORMAT_IMPORT_BNBA_TERPADU.xlsx
+/examples/master_pengembalian/FORMAT_IMPORT_BNBA_TERPADU_BERSIH.xlsx
+
+# Logs and diagnostics generated at runtime
+*.log
+/logs/
+
+# Temporary and local agent workspaces
+/.tmp/
+/tmp/
+/temp/
+/npm install -g 9router.txt
+/.codex-*/
+/.codex_spreadsheet_work/
+/.test_deps/
+/.test_deps*/
+
+# Python caches, environments, and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+
+# Frontend dependency/build caches
+node_modules/
+dist/
+build/
+.cache/
+.parcel-cache/
+coverage/
+
+# Local environment/credential files (examples remain trackable)
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Office temporary lock files
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.pptx
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db

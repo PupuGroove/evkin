@@ -446,13 +446,25 @@ def test_operational_dashboard_filters_are_and_cumulative_and_read_only(tmp_path
     assert svc.operational_dashboard({"tahun_sp2d": 2025})["kpi"]["total_kewajiban"] == 2_500_000
     # Master/payroll bank is BRI for A even though its Tahap 2 ledger says Mandiri.
     bank = svc.operational_dashboard({"bank": "BRI"})["kpi"]
-    assert bank["total_kewajiban"] == 1_000_000
+    assert (bank["total_kewajiban"], bank["total_realisasi_netto"], bank["total_sisa"], bank["sebagian"]) == (
+        1_000_000, 300_000, 700_000, 1,
+    )
+    mandiri = svc.operational_dashboard({"bank": "mandiri"})["kpi"]
+    assert (mandiri["total_kewajiban"], mandiri["total_realisasi_netto"], mandiri["total_sisa"], mandiri["sebagian"]) == (
+        2_000_000, 400_000, 1_600_000, 2,
+    )
+    assert svc.operational_dashboard({"bank": "BANK-TIDAK-ADA"})["kpi"] == {
+        "total_kewajiban": 0, "total_realisasi_netto": 0, "total_sisa": 0,
+        "total_kelebihan_bayar": 0, "lunas": 0, "sebagian": 0, "belum": 0, "overpaid": 0,
+    }
     assert svc.operational_dashboard({"provinsi": "Jawa Barat", "kabupaten_kota": "Bogor"})["kpi"]["total_kewajiban"] == 2_000_000
     assert svc.operational_dashboard({"batch_bpk": "BATCH 2"})["kpi"]["total_kewajiban"] == 2_000_000
     assert svc.operational_dashboard({"komponen": "UANG_MAKAN"})["kpi"]["total_kewajiban"] == 500_000
     # Tahap selects A but preserves A's entire cumulative ledger: 100k + 200k.
     stage = svc.operational_dashboard({"tahap": 2, "stage_mode": "single"})["kpi"]
     assert (stage["total_kewajiban"], stage["total_realisasi_netto"]) == (1_000_000, 300_000)
+    stage_um = svc.operational_dashboard({"tahap": 2, "stage_mode": "single", "komponen": "UANG_MAKAN"})["kpi"]
+    assert (stage_um["total_kewajiban"], stage_um["total_realisasi_netto"]) == (500_000, 300_000)
     combined = svc.operational_dashboard({"tahun_sp2d": 2025, "bank": "BRI", "kabupaten_kota": "Bandung", "tahap": 2})["kpi"]
     assert combined["total_kewajiban"] == 1_000_000
     assert svc.operational_dashboard({"provinsi": "Tidak Ada"})["kpi"] == {
@@ -464,6 +476,16 @@ def test_operational_dashboard_filters_are_and_cumulative_and_read_only(tmp_path
 def test_operational_dashboard_options_follow_current_metadata_without_duplicates(tmp_path):
     svc = service(tmp_path)
     _dashboard_metadata(svc)
+    conn = duckdb.connect(svc.db_path)
+    conn.executemany("""INSERT INTO pengembalian_final
+        (record_id,comparison_key,nip,tahun_sp2d,provinsi,kabupaten_kota,batch,row_json)
+        VALUES (?,?,?,?,?,?,?,?)""", [
+        ("F-A-SPACE", "F-A-SPACE", "A", 2025, "Jawa Barat", "Bandung", "BATCH 1", '{"nama_bank":" BRI "}'),
+        ("F-A-CASE", "F-A-CASE", "A", 2025, "Jawa Barat", "Bandung", "BATCH 1", '{"nama_bank":"bri"}'),
+        ("F-A-NULL", "F-A-NULL", "A", 2025, "Jawa Barat", "Bandung", "BATCH 1", '{"nama_bank":null}'),
+        ("F-A-BLANK", "F-A-BLANK", "A", 2025, "Jawa Barat", "Bandung", "BATCH 1", '{"nama_bank":""}'),
+    ])
+    conn.close()
     svc.import_rows([
         _stage_row("A", 2025, 1, 100_000),
         _stage_row("A", 2025, 2, 200_000, date="19/07/2026"),

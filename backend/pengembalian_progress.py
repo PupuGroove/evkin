@@ -101,6 +101,14 @@ def _master_bank_value(alias="f"):
     return f"coalesce(json_extract_string({alias}.row_json,'$.nama_bank'),'')"
 
 
+def _final_metadata_match(obligation_alias="o", final_alias="f"):
+    """Match canonical obligations to Final metadata, including legacy null periods."""
+    return (f"{final_alias}.nip={obligation_alias}.nip "
+            f"AND {final_alias}.tahun_sp2d={obligation_alias}.tahun_sp2d "
+            f"AND coalesce({final_alias}.periode_id,'LEGACY')="
+            f"coalesce({obligation_alias}.periode_id,'LEGACY')")
+
+
 def _stage_number(value):
     """Parse an unlimited positive integer stage, including common Roman labels."""
     text = (_clean(value) or "").upper().replace("TAHAP", "").strip()
@@ -950,8 +958,7 @@ class ProgressService:
         # Current final metadata narrows the population only; EXISTS avoids multiplying obligations.
         for key, column in (("kabupaten_kota", "kabupaten_kota"), ("batch_bpk", "batch")):
             if filters.get(key) not in (None, ""):
-                ow.append(f"EXISTS (SELECT 1 FROM pengembalian_final f WHERE f.nip=o.nip "
-                          f"AND f.tahun_sp2d=o.tahun_sp2d AND coalesce(f.periode_id,'')=coalesce(o.periode_id,'') "
+                ow.append(f"EXISTS (SELECT 1 FROM pengembalian_final f WHERE {_final_metadata_match()} "
                           f"AND f.{column}=?)")
                 op.append(filters[key])
         if filters.get("tenor_bulan") not in (None, ""):
@@ -966,8 +973,7 @@ class ProgressService:
         # Bank is payroll/master-bank metadata, never the bank recorded on a debit event.
         for key in ("nama_bank", "bank"):
             if filters.get(key) not in (None, ""):
-                ow.append(f"EXISTS (SELECT 1 FROM pengembalian_final f WHERE f.nip=o.nip "
-                          f"AND f.tahun_sp2d=o.tahun_sp2d AND coalesce(f.periode_id,'')=coalesce(o.periode_id,'') "
+                ow.append(f"EXISTS (SELECT 1 FROM pengembalian_final f WHERE {_final_metadata_match()} "
                           f"AND {_master_bank_sql(_master_bank_value())}=?)")
                 op.append(normalize_bank(filters[key]))
         for key,column in (("periode_debit","t.periode_debit"),("bulan_debit","t.bulan_debit"),
@@ -1048,9 +1054,7 @@ class ProgressService:
                 f"SELECT DISTINCT tahun_sp2d FROM ({sql}) q ORDER BY tahun_sp2d", params).fetchall()]
             provinces = [row[0] for row in conn.execute(
                 f"SELECT DISTINCT provinsi FROM ({sql}) q WHERE provinsi IS NOT NULL AND trim(provinsi)<>'' ORDER BY provinsi", params).fetchall()]
-            metadata_join = f"""FROM ({sql}) q JOIN pengembalian_final f
-                ON f.nip=q.nip AND f.tahun_sp2d=q.tahun_sp2d
-                AND coalesce(f.periode_id,'')=coalesce(q.periode_id,'')"""
+            metadata_join = f"FROM ({sql}) q JOIN pengembalian_final f ON {_final_metadata_match('q')}"
             banks = [row[0] for row in conn.execute(
                 f"""SELECT DISTINCT {_master_bank_sql(_master_bank_value())} {metadata_join}
                     WHERE trim({_master_bank_value()})<>'' ORDER BY 1""", params).fetchall()]
@@ -1356,10 +1360,12 @@ class ProgressService:
         if stage not in (None, ""):
             mode = str(stage_mode or "single").lower()
             operator = "<=" if mode == "cumulative" else "="
-            component = _component(filters.get("komponen") or filters.get("komponen_debit"))
-            component_clause = " AND t.komponen_debit=?" if component else ""
+            # Stage labels in the operational dashboard represent the staged Tukin
+            # payment workflow unless the caller explicitly selects another component.
+            component = _component(filters.get("komponen") or filters.get("komponen_debit")) or "TUKIN"
+            component_clause = " AND t.komponen_debit=?"
             sql = f"SELECT * FROM ({sql}) canonical WHERE EXISTS (SELECT 1 FROM pengembalian_progress_transaction t JOIN pengembalian_progress_import_batch b ON b.import_batch_id=t.import_batch_id WHERE t.obligation_id=canonical.obligation_id AND coalesce(t.is_active,true) AND b.status IN ('COMMITTED','PARTIAL'){component_clause} AND t.tahap {operator} ?)"
-            params = list(params) + ([component] if component else []) + [int(stage)]
+            params = list(params) + [component, int(stage)]
         conn = self.connect()
         try:
             row = conn.execute(f"""SELECT

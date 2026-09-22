@@ -295,11 +295,15 @@ def save_adjustment(db_path, payload):
             old = conn.execute('SELECT amount,reason,actor,source_fingerprint FROM tukin_combined_adjustment WHERE assessment_period=? AND nip=?', [period,nip]).fetchone()
             old = dict(zip(['amount','reason','actor','source_fingerprint'], old)) if old else None
             new = {'amount':int(amount), 'reason':reason, 'actor':actor, 'source_fingerprint':row['source_fingerprint']}
-            conn.execute('''INSERT INTO tukin_combined_adjustment VALUES (?,?,?,?,?,?,now())
+            conn.execute('''INSERT INTO tukin_combined_adjustment
+                (assessment_period,nip,amount,reason,actor,source_fingerprint,updated_at)
+                VALUES (?,?,?,?,?,?,now())
                 ON CONFLICT (assessment_period,nip) DO UPDATE SET amount=excluded.amount,
                 reason=excluded.reason,actor=excluded.actor,source_fingerprint=excluded.source_fingerprint,updated_at=now()''',
                 [period,nip,int(amount),reason,actor,row['source_fingerprint']])
-            conn.execute('INSERT INTO tukin_combined_adjustment_audit VALUES (?,?,?,?,?,?,now())',
+            conn.execute('''INSERT INTO tukin_combined_adjustment_audit
+                (id,assessment_period,nip,old_value,new_value,actor,created_at)
+                VALUES (?,?,?,?,?,?,now())''',
                 [str(uuid.uuid4()),period,nip,json.dumps(old,default=str),json.dumps(new),actor])
             conn.execute('COMMIT')
         except Exception:

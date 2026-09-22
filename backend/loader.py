@@ -8,6 +8,11 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+try:
+    from backend.schema_sync import create_table_from_relation, insert_relation_by_name
+except ModuleNotFoundError:  # pragma: no cover - direct execution from backend/
+    from schema_sync import create_table_from_relation, insert_relation_by_name
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -34,10 +39,10 @@ if __name__ == '__main__':
             print(f'Ingesting chunk with {n} rows (total {total})')
             con.register('temp_df', chunk)
             if first:
-                con.execute('CREATE OR REPLACE TABLE people AS SELECT * FROM temp_df')
+                create_table_from_relation(con, 'people', 'temp_df')
                 first = False
             else:
-                con.execute('INSERT INTO people SELECT * FROM temp_df')
+                insert_relation_by_name(con, 'people', 'temp_df')
             con.unregister('temp_df')
         print('Done. Total rows:', total)
     else:

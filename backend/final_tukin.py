@@ -200,7 +200,9 @@ def migrate(db_path):
             UNIQUE(nip,periode,mode,version))''')
         if not c.execute('SELECT count(*) FROM final_tukin_schema WHERE version=1').fetchone()[0]:
             for name, rate in [('SANGAT BAIK',0),('BAIK',0),('BUTUH PERBAIKAN',5),('KURANG',10),('SANGAT KURANG',15)]:
-                c.execute('INSERT INTO master_skp_rules VALUES(?,?,?,true,?,NULL,?)',
+                c.execute('''INSERT INTO master_skp_rules
+                    (id,predikat,potongan_percent,is_active,effective_from,effective_to,notes)
+                    VALUES(?,?,?,true,?,NULL,?)''',
                           [str(uuid.uuid4()), name, rate, '1900-01-01', 'Konfigurasi awal; tinjau sesuai kebijakan instansi'])
             c.execute('INSERT INTO final_tukin_schema(version) VALUES(1)')
         c.execute('INSERT INTO final_tukin_schema(version) VALUES(2) ON CONFLICT DO NOTHING')

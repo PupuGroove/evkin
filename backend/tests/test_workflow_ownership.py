@@ -84,6 +84,95 @@ def test_chunk_failure_preserves_original_table(isolated, monkeypatch):
         assert conn.execute('SELECT nip FROM raw_import').fetchall() == [('PARTICIPANT',)]
 
 
+def _daily_row_without_excused(nip='001'):
+    # This is the 37-column shape produced for ordinary attendance rows.  The
+    # conditional ``excused`` field makes leave rows the 38-column variant.
+    return {
+        '_id': f'row-{nip}', 'nip': nip, 'nama': 'Pegawai', 'jabatan': 'Staf',
+        'metode': 'reguler', 'tanggal': '2026-08-03', 'tanggalKey': '2026-08-03',
+        'monthKey': '2026-08', 'hari': 'Senin', 'jamMasuk': '07:30',
+        'jamPulang': '16:00', 'tanggalMasuk': '2026-08-03',
+        'tanggalPulang': '2026-08-03', 'masukAt': '', 'pulangAt': '',
+        'jamMasukAsli': '07:30', 'jamPulangAsli': '16:00',
+        'jamNormalisasi': 'Original', 'zona': 'WIB', 'durasiMin': 510,
+        'durasi': '8h 30m', 'jenis': '', 'statusHariLibur': 'Tidak',
+        'statusCuti': '', 'statusDuplikasi': '', 'statusLengkap': 'Lengkap',
+        'potKeterlambatan': 0, 'potPulangCepat': 0, 'potDurasi': 0,
+        'potHariKurang': 0, 'potTidakLengkap': 0, 'totalHarian': 0,
+        'flags': [], 'statusJadwal': 'ADA_JADWAL', 'statusAbsensi': 'NORMAL',
+        '_lateMin': 0, '_earlyMin': 0,
+    }
+
+
+def test_hitung_harian_chunk_accepts_conditional_38th_column_by_name(isolated):
+    ordinary = _daily_row_without_excused('001')
+    assert len(ordinary) == 37
+    api.sync_workflow_table({'source': 'daily_data', 'rows': [ordinary], 'replace': True})
+
+    leave = _daily_row_without_excused('002')
+    leave['excused'] = True
+    # Reverse the source order as well: neither count nor position may control
+    # the target mapping.
+    leave = dict(reversed(list(leave.items())))
+    api.sync_workflow_table({'source': 'daily_data', 'rows': [leave], 'replace': False})
+
+    with duckdb.connect(isolated) as conn:
+        stored = conn.execute(
+            'SELECT nip,tanggal,excused,_lateMin,_earlyMin FROM hitung_harian ORDER BY nip'
+        ).fetchall()
+    assert stored == [
+        ('001', '2026-08-03', False, 0, 0),
+        ('002', '2026-08-03', True, 0, 0),
+    ]
+
+
+def test_chunk_append_maps_reordered_source_columns_by_name(isolated):
+    api.sync_workflow_table({
+        'source': 'raw_import', 'rows': [{'nip': 'FIRST', 'tanggal': '2026-08-01'}],
+        'replace': True,
+    })
+    api.sync_workflow_table({
+        'source': 'raw_import', 'rows': [{'tanggal': '2026-08-02', 'nip': 'SECOND'}],
+        'replace': False,
+    })
+    with duckdb.connect(isolated) as conn:
+        assert conn.execute('SELECT nip,tanggal FROM raw_import ORDER BY nip').fetchall() == [
+            ('FIRST', '2026-08-01'), ('SECOND', '2026-08-02')
+        ]
+
+
+def test_chunk_append_rejects_missing_required_column_without_partial_insert(isolated):
+    api.sync_workflow_table({
+        'source': 'raw_import', 'rows': [{'nip': 'FIRST', 'tanggal': '2026-08-01'}],
+        'replace': True,
+    })
+    with pytest.raises(ValueError, match=r'Schema mismatch for raw_import: missing required columns: tanggal'):
+        api.sync_workflow_table({
+            'source': 'raw_import', 'rows': [{'nip': 'SECOND'}], 'replace': False,
+        })
+    with duckdb.connect(isolated) as conn:
+        assert conn.execute('SELECT nip,tanggal FROM raw_import').fetchall() == [
+            ('FIRST', '2026-08-01')
+        ]
+
+
+def test_chunk_append_rejects_unapproved_extra_column_without_partial_insert(isolated):
+    api.sync_workflow_table({
+        'source': 'raw_import', 'rows': [{'nip': 'FIRST', 'tanggal': '2026-08-01'}],
+        'replace': True,
+    })
+    with pytest.raises(ValueError, match=r'Schema mismatch for raw_import: unexpected source columns: temporary_debug_column'):
+        api.sync_workflow_table({
+            'source': 'raw_import',
+            'rows': [{'nip': 'SECOND', 'tanggal': '2026-08-02', 'temporary_debug_column': 'debug'}],
+            'replace': False,
+        })
+    with duckdb.connect(isolated) as conn:
+        assert conn.execute('SELECT nip,tanggal FROM raw_import').fetchall() == [
+            ('FIRST', '2026-08-01')
+        ]
+
+
 def test_delete_absensi_requires_confirmation_and_preserves_other_owners(isolated):
     with pytest.raises(HTTPException):
         api.delete_absensi_workflow({})

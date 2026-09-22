@@ -2974,7 +2974,12 @@ class ArchiveService:
                      ada_perubahan,flag_ada_perubahan,status_lunas,nilai_awal,nilai_final,
                      selisih_total,total_debit_berhasil,total_debit_gagal,sisa_piutang,row_json,
                      total_tukin_awal,final_tukin,final_uang_makan,final_total)
-                     SELECT * FROM _pengembalian_final_build""")
+                     SELECT record_id,comparison_key,periode_id,nip,nama,tahun_sp2d,periode,batch,
+                            provinsi,kabupaten_kota,unit_kerja,status_compare,arah_perubahan,
+                            ada_perubahan,flag_ada_perubahan,status_lunas,nilai_awal,nilai_final,
+                            selisih_total,total_debit_berhasil,total_debit_gagal,sisa_piutang,row_json,
+                            total_tukin_awal,final_tukin,final_uang_makan,final_total
+                     FROM _pengembalian_final_build""")
                 conn.unregister("_pengembalian_final_build")
             conn.execute("COMMIT")
             return {"status": "ok", "rows": len(rows), "periode_id": period_id}

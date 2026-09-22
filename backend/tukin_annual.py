@@ -1119,7 +1119,9 @@ class TukinAnnualService:
                     created_at TIMESTAMP DEFAULT now()
                 )""")
                 conn.execute(
-                    "INSERT INTO tukin_admin_audit VALUES (?,?,?,?,?,?,now())",
+                    """INSERT INTO tukin_admin_audit
+                       (id,action,assessment_period,actor,reason,details,created_at)
+                       VALUES (?,?,?,?,?,?,now())""",
                     [str(uuid.uuid4()), "DELETE_FINAL_RUN", assessment_period, actor, reason, f"deleted={count}"],
                 )
                 conn.execute("COMMIT")
@@ -1149,7 +1151,9 @@ class TukinAnnualService:
                     created_at TIMESTAMP DEFAULT now()
                 )""")
                 conn.execute(
-                    "INSERT INTO tukin_admin_audit VALUES (?,?,?,?,?,?,now())",
+                    """INSERT INTO tukin_admin_audit
+                       (id,action,assessment_period,actor,reason,details,created_at)
+                       VALUES (?,?,?,?,?,?,now())""",
                     [str(uuid.uuid4()), "DELETE_ALL_FINAL", None, actor, reason, f"deleted={count}"],
                 )
                 conn.execute("COMMIT")
@@ -1354,7 +1358,9 @@ class TukinAnnualService:
                 actor VARCHAR NOT NULL, reason VARCHAR NOT NULL, created_at TIMESTAMP DEFAULT now()
             )""")
             conn.execute(
-                "INSERT INTO tukin_period_audit VALUES (?,?,?,?,?,?,?,now())",
+                """INSERT INTO tukin_period_audit
+                   (id,assessment_period,action,old_status,new_status,actor,reason,created_at)
+                   VALUES (?,?,?,?,?,?,?,now())""",
                 [str(uuid.uuid4()), assessment, "STATUS_CHANGE", old_status, status, actor, reason],
             )
             if status == "PAID" and exists[0] != "PAID":

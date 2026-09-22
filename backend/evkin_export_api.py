@@ -25,6 +25,7 @@ import concurrent.futures
 from backend.runtime_guard import claim_database, database_job, serialize_database_requests
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
 from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
+from backend.schema_sync import create_table_from_relation, insert_relation_by_name
 
 # Executor for background compute jobs
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='evkin-jobs')
@@ -211,6 +212,14 @@ RESETTABLE_WORKFLOW_TABLES = (
 # The legacy master_data projection is read-only to workflow clients.
 WORKFLOW_WRITABLE = {key: table for key, table in WORKFLOW_TABLES.items() if key != 'master_data'}
 
+# These fields are created conditionally by calc.js.  Normalizing them for
+# every daily batch gives chunked sync one stable schema without inventing a
+# business fallback: False/NULL are the same values used when the condition
+# did not apply.
+WORKFLOW_OPTIONAL_COLUMNS = {
+    'daily_data': {'excused': False, '_lateMin': None, '_earlyMin': None},
+}
+
 
 def workflow_rows(source: str, value: Any) -> list:
     if source == 'config':
@@ -233,6 +242,14 @@ def workflow_rows(source: str, value: Any) -> list:
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise HTTPException(400, 'Data workflow harus berupa daftar objek')
     return value
+
+
+def prepare_workflow_frame(source: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    for column, default in WORKFLOW_OPTIONAL_COLUMNS.get(source, {}).items():
+        if column not in frame.columns:
+            frame[column] = default
+    return prepare_database_frame(frame)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -603,10 +620,10 @@ def sync_workflow(payload: dict[str, Any]) -> dict:
             except Exception:
                 pass
             if rows:
-                frame = prepare_database_frame(pd.DataFrame(rows))
+                frame = prepare_workflow_frame(source, rows)
                 # register and create/replace
                 dconn.register('tmp_frame', frame)
-                dconn.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM tmp_frame')
+                create_table_from_relation(dconn, table, 'tmp_frame')
                 try:
                     dconn.unregister('tmp_frame')
                 except Exception:
@@ -913,6 +930,7 @@ def sync_workflow_table(payload: dict[str, Any]) -> dict:
     rows = workflow_rows(source, payload.get("rows"))
     ensure_duckdb_master_schema()
     replace = bool(payload.get("replace", False))
+    frame = prepare_workflow_frame(source, rows) if rows else None
 
     import duckdb as _duckdb
     dconn = _duckdb.connect(DUCKDB_PATH)
@@ -921,22 +939,18 @@ def sync_workflow_table(payload: dict[str, Any]) -> dict:
         if replace:
             dconn.execute(f'DROP TABLE IF EXISTS "{table}"')
         if rows:
-            frame = prepare_database_frame(pd.DataFrame(rows))
             dconn.register('tmp_frame', frame)
             if replace:
-                dconn.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM tmp_frame')
+                create_table_from_relation(dconn, table, 'tmp_frame')
             else:
-                # if table exists append by creating temp and inserting
-                try:
-                    dconn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" AS SELECT * FROM tmp_frame LIMIT 0')
-                except Exception:
-                    pass
-                dconn.register('to_append', frame)
-                dconn.execute(f'INSERT INTO "{table}" SELECT * FROM to_append')
-                try:
-                    dconn.unregister('to_append')
-                except Exception:
-                    pass
+                exists = dconn.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema='main' AND table_name=?", [table]
+                ).fetchone()[0]
+                if exists:
+                    insert_relation_by_name(dconn, table, 'tmp_frame')
+                else:
+                    create_table_from_relation(dconn, table, 'tmp_frame')
             try:
                 dconn.unregister('tmp_frame')
             except Exception:
@@ -1914,7 +1928,15 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
         fx_kompensasi_jum = time_to_min(fx.get('kompensasiJumat', '17:00'))
 
         # ensure hitung_harian table exists empty for appending
-        dconn.execute('CREATE TABLE IF NOT EXISTS hitung_harian AS SELECT * FROM (SELECT NULL::TEXT AS nip, NULL::TEXT AS nama, NULL::TEXT AS jabatan, NULL::TEXT AS bulan, NULL::DATE AS tanggal, NULL::TEXT AS zona, NULL::TEXT AS jamMasuk, NULL::TEXT AS jamPulang, NULL::TEXT AS durasi, NULL::TEXT AS jamNormalisasi, NULL::TEXT AS jamMasukAsli, NULL::TEXT AS jamPulangAsli, NULL::DOUBLE AS durasiMin, NULL::TEXT AS metode, NULL::TEXT AS jenis, NULL::TEXT AS statusHariLibur, NULL::TEXT AS statusCuti, NULL::BOOLEAN AS statusDuplikasi, NULL::TEXT AS statusLengkap, NULL::DOUBLE AS potKeterlambatan, NULL::DOUBLE AS potPulangCepat, NULL::DOUBLE AS potDurasi, NULL::DOUBLE AS potTidakLengkap, NULL::DOUBLE AS totalHarian, NULL::TEXT AS flags) WHERE FALSE')
+        dconn.execute('''CREATE TABLE IF NOT EXISTS hitung_harian (
+            nip TEXT, nama TEXT, jabatan TEXT, bulan TEXT, tanggal DATE, zona TEXT,
+            jamMasuk TEXT, jamPulang TEXT, durasi TEXT, jamNormalisasi TEXT,
+            jamMasukAsli TEXT, jamPulangAsli TEXT, durasiMin DOUBLE, metode TEXT,
+            jenis TEXT, statusHariLibur TEXT, statusCuti TEXT,
+            statusDuplikasi BOOLEAN, statusLengkap TEXT,
+            potKeterlambatan DOUBLE, potPulangCepat DOUBLE, potDurasi DOUBLE,
+            potTidakLengkap DOUBLE, totalHarian DOUBLE, flags TEXT
+        )''')
 
         # compute total rows to process
         count_q = f"SELECT COUNT(*) AS c FROM raw_import WHERE substr(tanggal,1,7) = '{bulan}'"
@@ -1945,7 +1967,13 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
                 use_pulang_expr = 'pulangMin'
 
             # Query to compute chunk
-            sql = f"INSERT INTO hitung_harian " \
+            sql = f"""INSERT INTO hitung_harian (
+                      nip, nama, jabatan, bulan, tanggal, zona, jamMasuk, jamPulang,
+                      durasi, jamNormalisasi, jamMasukAsli, jamPulangAsli, durasiMin,
+                      metode, jenis, statusHariLibur, statusCuti, statusDuplikasi,
+                      statusLengkap, potTidakLengkap, potKeterlambatan,
+                      potPulangCepat, potDurasi, totalHarian, flags
+                  ) """ \
                   f"SELECT nip, nama, COALESCE(jabatan, '') AS jabatan, substr(tanggal,1,7) AS bulan, tanggal::DATE AS tanggal, zona, " \
                   f"printf('%02d:%02d', CAST(({use_masuk_expr} / 60) AS INTEGER), CAST(({use_masuk_expr} % 60) AS INTEGER)) AS jamMasuk, " \
                   f"printf('%02d:%02d', CAST(({use_pulang_expr} / 60) AS INTEGER), CAST(({use_pulang_expr} % 60) AS INTEGER)) AS jamPulang, " \

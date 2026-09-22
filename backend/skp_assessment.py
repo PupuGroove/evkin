@@ -432,7 +432,10 @@ class SkpAssessmentService:
                     'raw_json':json.dumps(source, ensure_ascii=False, default=str)}
                     for index, source in enumerate(payload.get('rows') or [], 2)])
                 conn.register('skp_original_rows', raw_frame)
-                conn.execute('INSERT INTO skp_import_source SELECT * FROM skp_original_rows')
+                conn.execute('''INSERT INTO skp_import_source
+                    (batch_id, assessment_period, source_row, source_file, raw_json)
+                    SELECT batch_id, assessment_period, source_row, source_file, raw_json
+                    FROM skp_original_rows''')
                 conn.unregister('skp_original_rows')
                 for row in valid_rows:
                     previous = conn.execute(

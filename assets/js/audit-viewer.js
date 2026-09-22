@@ -30,12 +30,7 @@
       <div class="card">
         <h3>Statistik Aktivitas</h3>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px;">
-          ${Object.entries(stats.byAction).map(([action, count]) => `
-            <div style="padding: 12px; background: #f5f5f5; border-radius: 4px; text-align: center;">
-              <div style="font-weight: 500; font-size: 18px; color: #1976d2;">${count}</div>
-              <div style="font-size: 12px; color: #666; margin-top: 4px;">${formatActionLabel(action)}</div>
-            </div>
-          `).join('')}
+          <div id="auditActionStats" style="display: contents;"></div>
         </div>
       </div>
 
@@ -59,18 +54,7 @@
                   <th>Details</th>
                 </tr>
               </thead>
-              <tbody>
-                ${logs.slice(0, 50).map(log => `
-                  <tr>
-                    <td style="font-size: 12px; white-space: nowrap;">${formatTimestamp(log.timestamp)}</td>
-                    <td style="font-size: 11px; white-space: nowrap;">${U.esc(log.sessionId || '-')}</td>
-                    <td><span class="pill gray">${log.action}</span></td>
-                    <td style="font-size: 12px; max-width: 300px; word-break: break-word;">
-                      <code>${JSON.stringify(log.details, null, 2)}</code>
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
+              <tbody id="auditLogRows"></tbody>
             </table>
           </div>
           <p style="text-align: center; margin-top: 12px; font-size: 12px; color: #999;">
@@ -80,9 +64,13 @@
       </div>
 
       <div class="actions-row">
-        <button class="btn btn-ghost" onclick="EVKIN.go('dashboard')"><i data-lucide="arrow-left"></i> Kembali</button>
+        <button id="auditBackBtn" class="btn btn-ghost"><i data-lucide="arrow-left"></i> Kembali</button>
       </div>
     `;
+
+    renderActionStats(el.querySelector('#auditActionStats'), stats.byAction);
+    const logRows = el.querySelector('#auditLogRows');
+    if (logRows) renderRows(logRows, logs.slice(0, 50));
 
     // Event handlers
     const exportBtn = el.querySelector('#exportAuditBtn');
@@ -110,28 +98,64 @@
       };
     }
 
+    const backBtn = el.querySelector('#auditBackBtn');
+    if (backBtn) backBtn.addEventListener('click', () => EVKIN.go('dashboard'));
+
     const filterInput = el.querySelector('#filterAction');
     if (filterInput) {
       filterInput.onchange = () => {
         const action = filterInput.value.trim().toUpperCase();
         if (action) {
           const filtered = EVKIN.auditMod.getReport({ action });
-          el.querySelector('tbody').innerHTML = filtered.slice(0, 50).map(log => `
-            <tr>
-              <td style="font-size: 12px; white-space: nowrap;">${formatTimestamp(log.timestamp)}</td>
-              <td style="font-size: 11px; white-space: nowrap;">${U.esc(log.sessionId || '-')}</td>
-              <td><span class="pill gray">${log.action}</span></td>
-              <td style="font-size: 12px; max-width: 300px; word-break: break-word;">
-                <code>${JSON.stringify(log.details, null, 2)}</code>
-              </td>
-            </tr>
-          `).join('');
+          const tbody = el.querySelector('#auditLogRows');
+          if (tbody) renderRows(tbody, filtered.slice(0, 50));
         }
       };
     }
 
     if (window.lucide) lucide.createIcons();
   };
+
+  function appendText(parent, tagName, value, className, style) {
+    const element = document.createElement(tagName);
+    if (className) element.className = className;
+    if (style) element.style.cssText = style;
+    element.textContent = value == null ? '' : String(value);
+    parent.appendChild(element);
+    return element;
+  }
+
+  function renderActionStats(container, byAction) {
+    if (!container) return;
+    container.replaceChildren();
+    Object.entries(byAction || {}).forEach(([action, count]) => {
+      const card = document.createElement('div');
+      card.style.cssText = 'padding:12px;background:#f5f5f5;border-radius:4px;text-align:center';
+      appendText(card, 'div', count, '', 'font-weight:500;font-size:18px;color:#1976d2');
+      appendText(card, 'div', formatActionLabel(action), '', 'font-size:12px;color:#666;margin-top:4px');
+      container.appendChild(card);
+    });
+  }
+
+  function renderRows(tbody, logs) {
+    tbody.replaceChildren();
+    (logs || []).forEach(log => {
+      const row = document.createElement('tr');
+      appendText(row, 'td', formatTimestamp(log.timestamp), '', 'font-size:12px;white-space:nowrap');
+      appendText(row, 'td', log.sessionId || '-', '', 'font-size:11px;white-space:nowrap');
+      const actionCell = document.createElement('td');
+      appendText(actionCell, 'span', log.action, 'pill gray');
+      row.appendChild(actionCell);
+      const detailCell = document.createElement('td');
+      detailCell.style.cssText = 'font-size:12px;max-width:300px;word-break:break-word';
+      appendText(detailCell, 'code', JSON.stringify(log.details, null, 2));
+      row.appendChild(detailCell);
+      tbody.appendChild(row);
+    });
+  }
+
+  mod.renderRows = renderRows;
+  mod.renderActionStats = renderActionStats;
 
   function formatActionLabel(action) {
     const labels = {

@@ -225,6 +225,10 @@
           const flags = await EVKIN.exportBackend.getWorkflowFlags(bulan);
           const container = el.querySelector('#serverStatsContainer');
           const counts = stats && stats.counts ? stats.counts : {};
+          const safeCount = key => {
+            const value = Number(counts[key]);
+            return Number.isFinite(value) ? value : 0;
+          };
           const flagMap = flags && flags.flags ? flags.flags : {};
           const semifinalKey = 'semifinal:' + (bulan || '') ;
           const semifinalFlag = flagMap[semifinalKey] || null;
@@ -233,10 +237,10 @@
               <summary><span><strong>Analitik workflow server</strong><small>Data proses dan verifikasi backend</small></span><i data-lucide="chevron-down"></i></summary>
               <div class="server-analytics-body">
               <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="database"></i></div><div><div class="stat-val">${counts['raw_import'] ?? 0}</div><div class="stat-label">Raw Import</div></div></div>
-                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="calendar"></i></div><div><div class="stat-val">${counts['hitung_harian'] ?? 0}</div><div class="stat-label">Hitung Harian</div></div></div>
-                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="users"></i></div><div><div class="stat-val">${counts['rekap_sdm'] ?? 0}</div><div class="stat-label">Rekap SDM</div></div></div>
-                <div class="stat-card green"><div class="stat-icon"><i data-lucide="file-spreadsheet"></i></div><div><div class="stat-val">${counts['final_absensi'] ?? 0}</div><div class="stat-label">Final Absensi</div></div></div>
+                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="database"></i></div><div><div class="stat-val">${safeCount('raw_import')}</div><div class="stat-label">Raw Import</div></div></div>
+                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="calendar"></i></div><div><div class="stat-val">${safeCount('hitung_harian')}</div><div class="stat-label">Hitung Harian</div></div></div>
+                <div class="stat-card blue"><div class="stat-icon"><i data-lucide="users"></i></div><div><div class="stat-val">${safeCount('rekap_sdm')}</div><div class="stat-label">Rekap SDM</div></div></div>
+                <div class="stat-card green"><div class="stat-icon"><i data-lucide="file-spreadsheet"></i></div><div><div class="stat-val">${safeCount('final_absensi')}</div><div class="stat-label">Final Absensi</div></div></div>
                 <div style="flex:1"></div>
                 <div class="stat-card ${semifinalFlag && semifinalFlag.verified ? 'green' : 'yellow'}"><div class="stat-icon"><i data-lucide="shield-check"></i></div><div><div class="stat-val">${semifinalFlag && semifinalFlag.verified ? 'Terverifikasi' : 'Belum'}</div><div class="stat-label">Server Semifinal</div></div></div>
               </div>

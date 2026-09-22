@@ -9,6 +9,7 @@
   };
 
   function esc(value) { return U.esc(String(value == null ? '' : value)); }
+  function num(value) { return Number(value || 0).toLocaleString('id-ID'); }
   function baseUrl(path) { return new URL(path, EVKIN.exportBackend.apiBase).toString(); }
   async function api(path, options) {
     const response = await fetch(baseUrl(path), { cache: 'no-store', ...(options || {}) });
@@ -220,11 +221,11 @@
   function renderPreview(root, data) {
     const area = root.querySelector('#skpPreviewArea'); area.classList.remove('hidden');
     if (data.import_mode === 'FINAL') {
-      area.innerHTML = `<h3>Validasi Hasil Final SKP</h3><p>${data.row_count} baris · ${data.valid_count} valid · ${data.rejected_count} ditolak. Menampilkan maksimal 100 baris; seluruh baris valid akan diproses.</p><div class="table-wrap"><table class="data-table sm"><thead><tr><th>NIP</th><th>Nama</th><th>Predikat sumber</th><th>Status laporan</th><th>Validasi</th></tr></thead><tbody>${data.rows.slice(0,100).map(row => `<tr><td>${esc(row.nip)}</td><td>${esc(row.nama)}</td><td>${esc(row.source_predicate)}</td><td>${esc(row.report_status)}</td><td>${esc(row.validation_status)} ${(row.issues || []).map(i => esc(i.message)).join('; ')}</td></tr>`).join('')}</tbody></table></div>`;
+      area.innerHTML = `<h3>Validasi Hasil Final SKP</h3><p>${num(data.row_count)} baris · ${num(data.valid_count)} valid · ${num(data.rejected_count)} ditolak. Menampilkan maksimal 100 baris; seluruh baris valid akan diproses.</p><div class="table-wrap"><table class="data-table sm"><thead><tr><th>NIP</th><th>Nama</th><th>Predikat sumber</th><th>Status laporan</th><th>Validasi</th></tr></thead><tbody>${data.rows.slice(0,100).map(row => `<tr><td>${esc(row.nip)}</td><td>${esc(row.nama)}</td><td>${esc(row.source_predicate)}</td><td>${esc(row.report_status)}</td><td>${esc(row.validation_status)} ${(row.issues || []).map(i => esc(i.message)).join('; ')}</td></tr>`).join('')}</tbody></table></div>`;
       return;
     }
     const metric = (row, code) => `${pill(row[code + '_status'])}<br><span class="muted">${esc(row[code + '_actual'] ?? '—')} / ${esc(row[code + '_target'] ?? '—')}${row[code + '_achievement_pct'] != null ? ` · ${esc(row[code + '_achievement_pct'])}%` : ''}</span>`;
-    area.innerHTML = `<div class="ta-section-head"><div><h3>Hasil Validasi</h3><p class="muted">${data.row_count} baris diperiksa · ${data.valid_count} valid · ${data.rejected_count} ditolak · ${data.warning_count} peringatan · ${data.active_config_count || 0} aturan aktif</p></div>${pill(data.master_available ? 'MASTER TERHUBUNG' : 'MASTER KOSONG')}</div>
+    area.innerHTML = `<div class="ta-section-head"><div><h3>Hasil Validasi</h3><p class="muted">${num(data.row_count)} baris diperiksa · ${num(data.valid_count)} valid · ${num(data.rejected_count)} ditolak · ${num(data.warning_count)} peringatan · ${num(data.active_config_count)} aturan aktif</p></div>${pill(data.master_available ? 'MASTER TERHUBUNG' : 'MASTER KOSONG')}</div>
       <div class="table-wrap"><table class="data-table sm"><thead><tr><th>Baris</th><th>NIP/Nama</th><th>Predikat</th><th>HEK<br><span class="muted">realisasi/target</span></th><th>Verkom</th><th>Graduasi</th><th>P2K2</th><th>Validasi</th><th>Masalah</th></tr></thead><tbody>${data.rows.map(row => `<tr><td>${row.source_row}</td><td><b>${esc(row.nama || '-')}</b><br><span class="muted">${esc(row.nip)}</span></td><td>${esc(row.source_predicate || row.report_status)}</td><td>${metric(row,'hek')}</td><td>${metric(row,'verkom')}</td><td>${metric(row,'graduasi')}</td><td>${metric(row,'p2k2')}</td><td>${pill(row.validation_status)}</td><td>${(row.issues || []).map(i => `<div class="skp-issue ${i.severity.toLowerCase()}">${esc(i.message)}</div>`).join('') || '—'}</td></tr>`).join('')}</tbody></table></div>`;
   }
 

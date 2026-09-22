@@ -5,10 +5,18 @@ Set-Location $projectRoot
 if (-not $env:EVKIN_DUCKDB_PATH) { $env:EVKIN_DUCKDB_PATH = Join-Path $projectRoot 'backend\data\EVKIN_MASTER.duckdb' }
 $port = if ($env:EVKIN_HTTP_PORT) { [int]$env:EVKIN_HTTP_PORT } else { 8000 }
 $env:EVKIN_HTTP_PORT = [string]$port
-$insecureDev = $env:EVKIN_ALLOW_INSECURE_LOCAL_DEV -eq '1'
-$apiKey = if ($env:EVKIN_API_KEY) { $env:EVKIN_API_KEY } else { $env:EVKIN_ANALYTICS_API_KEY }
-if (-not $apiKey -and -not $insecureDev) {
-    throw 'EVKIN_API_KEY wajib diatur sebelum backend dijalankan. Gunakan EVKIN_ALLOW_INSECURE_LOCAL_DEV=1 hanya untuk test/development lokal.'
+$apiKey = $env:EVKIN_API_KEY
+if (-not $apiKey) {
+    $tokenBytes = New-Object byte[] 32
+    $tokenGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $tokenGenerator.GetBytes($tokenBytes)
+    } finally {
+        $tokenGenerator.Dispose()
+    }
+    $apiKey = [Convert]::ToBase64String($tokenBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $env:EVKIN_API_KEY = $apiKey
+    Write-Host 'EVKIN secure local session initialized.'
 }
 if (-not $env:EVKIN_ALLOWED_ORIGINS) {
     $env:EVKIN_ALLOWED_ORIGINS = "http://127.0.0.1:$port,http://localhost:$port"

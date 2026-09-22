@@ -30,6 +30,124 @@
   backend.apiBase = resolveApiBase();
   backend.enabled = false;
   backend.syncQueue = Promise.resolve();
+  const API_KEY_STORAGE = 'evkin.localApiKey';
+  const API_KEY_HEADER = 'X-EVKIN-API-Key';
+  const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
+  const authenticatedOrigins = new Set();
+
+  function storageGet() {
+    try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(API_KEY_STORAGE) || '' : ''; }
+    catch (_) { return ''; }
+  }
+
+  function storageSet(value) {
+    try {
+      if (typeof sessionStorage === 'undefined') return;
+      if (value) sessionStorage.setItem(API_KEY_STORAGE, value);
+      else sessionStorage.removeItem(API_KEY_STORAGE);
+    } catch (_) { /* Session storage may be disabled by browser policy. */ }
+  }
+
+  backend.setApiKey = function (value) {
+    backend.apiKey = String(value || '').trim();
+    storageSet(backend.apiKey);
+  };
+  backend.getApiKey = function () { return backend.apiKey || storageGet(); };
+  backend.registerAuthenticatedOrigin = function (value) {
+    try { authenticatedOrigins.add(new URL(normalizeApiBase(value)).origin); } catch (_) { /* Invalid URLs are rejected elsewhere. */ }
+  };
+  backend.registerAuthenticatedOrigin(backend.apiBase);
+
+  (function captureApiKeyFromFragment() {
+    if (typeof location === 'undefined' || typeof URLSearchParams === 'undefined') return;
+    const fragment = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+    const supplied = fragment.get('evkin-api-key');
+    if (!supplied) return;
+    backend.setApiKey(supplied);
+    fragment.delete('evkin-api-key');
+    if (typeof history !== 'undefined' && history.replaceState) {
+      const remaining = fragment.toString();
+      history.replaceState(null, '', location.pathname + location.search + (remaining ? '#' + remaining : ''));
+    }
+  })();
+
+  function requestUrl(input) {
+    const value = input && typeof input === 'object' && input.url ? input.url : input;
+    try {
+      const base = typeof location !== 'undefined' && location.href ? location.href : backend.apiBase + '/';
+      return new URL(String(value), base);
+    } catch (_) { return null; }
+  }
+
+  function authenticatedFetch(input, options) {
+    if (!nativeFetch) return Promise.reject(new Error('Fetch API tidak tersedia.'));
+    const target = requestUrl(input);
+    const key = backend.getApiKey();
+    if (!target || !key || !authenticatedOrigins.has(target.origin)) return nativeFetch(input, options);
+    const next = { ...(options || {}) };
+    if (typeof Headers !== 'undefined') {
+      const inherited = input && typeof input === 'object' ? input.headers : undefined;
+      const headers = new Headers(next.headers || inherited || {});
+      if (!headers.has(API_KEY_HEADER)) headers.set(API_KEY_HEADER, key);
+      next.headers = headers;
+    } else {
+      next.headers = { ...((input && input.headers) || {}), ...(next.headers || {}) };
+      if (!next.headers[API_KEY_HEADER]) next.headers[API_KEY_HEADER] = key;
+    }
+    return nativeFetch(input, next);
+  }
+
+  backend.apiFetch = authenticatedFetch;
+  if (nativeFetch) globalThis.fetch = authenticatedFetch;
+
+  backend.downloadAuthenticated = async function (value) {
+    const response = await authenticatedFetch(value, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) throw new Error('Download gagal: HTTP ' + response.status);
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+    const filename = match ? decodeURIComponent(match[1].replace(/\"$/, '')) : 'download';
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl; anchor.download = filename; anchor.hidden = true;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+  };
+
+  backend.openAuthenticated = async function (value) {
+    const response = await authenticatedFetch(value, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) throw new Error('Permintaan gagal: HTTP ' + response.status);
+    const objectUrl = URL.createObjectURL(await response.blob());
+    window.open(objectUrl, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+  };
+
+  if (typeof window !== 'undefined' && typeof window.open === 'function') {
+    const nativeOpen = window.open.bind(window);
+    window.open = function (value, target, features) {
+      const destination = requestUrl(value);
+      if (destination && authenticatedOrigins.has(destination.origin) && /^\/(api|analytics|pengembalian)(\/|$)/.test(destination.pathname)) {
+        backend.openAuthenticated(destination.toString()).catch(error => {
+          if (EVKIN.toast) EVKIN.toast(error.message, 'error');
+        });
+        return null;
+      }
+      return nativeOpen(value, target, features);
+    };
+  }
+
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('click', event => {
+      const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+      if (!anchor) return;
+      const target = requestUrl(anchor.href);
+      if (!target || !authenticatedOrigins.has(target.origin) || !/^\/(api|analytics|pengembalian)(\/|$)/.test(target.pathname)) return;
+      event.preventDefault();
+      backend.downloadAuthenticated(target.toString()).catch(error => {
+        if (EVKIN.toast) EVKIN.toast(error.message, 'error');
+      });
+    }, true);
+  }
   backend.isHttpServed = function () {
     return typeof window !== 'undefined' && window.location.protocol.startsWith('http');
   };
@@ -59,6 +177,7 @@
       try {
         await backend.health(candidate);
         backend.apiBase = candidate;
+        backend.registerAuthenticatedOrigin(candidate);
         backend.analyticsBase = backend.apiBase.replace(/\/$/, '') + '/analytics';
         lastError = null;
         break;

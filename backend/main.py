@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi.responses import StreamingResponse
 import io
 from backend.runtime_guard import claim_database, serialize_database_requests
+from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 
 # Use same DuckDB file as backend by default (configurable via EVKIN_DUCKDB_PATH env var)
 # Default now points to backend/data/EVKIN_MASTER.duckdb to act as the single source of truth.
@@ -17,6 +18,7 @@ DUCKDB_PATH = os.environ.get('EVKIN_DUCKDB_PATH') or str(Path(__file__).resolve(
 
 app = FastAPI(title="HR - DuckDB Analytics API")
 app.middleware('http')(serialize_database_requests)
+app.add_middleware(ApiKeyMiddleware)
 
 
 @app.on_event('startup')
@@ -24,9 +26,10 @@ def claim_analytics_database():
     claim_database(DUCKDB_PATH)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
 )
 
 # Avoid holding a long-lived DuckDB connection at import time. Each request opens
@@ -65,10 +68,10 @@ except Exception:
 
 
 def _require_api_key(request: Request):
-    expected_key = os.environ.get('EVKIN_ANALYTICS_API_KEY')
+    expected_key = os.environ.get('EVKIN_API_KEY') or os.environ.get('EVKIN_ANALYTICS_API_KEY')
     if not expected_key:
         return True
-    key = request.headers.get('x-api-key') or request.headers.get('X-Api-Key') or request.headers.get('authorization')
+    key = request.headers.get('x-evkin-api-key') or request.headers.get('x-api-key') or request.headers.get('authorization')
     if key and key.lower().startswith('bearer '):
         key = key.split(' ', 1)[1]
     if key != expected_key:
@@ -78,7 +81,7 @@ def _require_api_key(request: Request):
 # Simple health check
 @app.get("/health")
 def health():
-    return {"status": "ok", "duckdb": DUCKDB_PATH}
+    return {"status": "ok", "service": "evkin-analytics"}
 
 # Pydantic model for search parameters
 class PeopleQuery(BaseModel):

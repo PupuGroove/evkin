@@ -9,16 +9,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
+from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "pembulatan_jobs.db")
 
 app = FastAPI(title="EVKIN Pembulatan Backend", version="1.0.0")
+app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
 )
 
 

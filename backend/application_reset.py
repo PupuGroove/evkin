@@ -1,15 +1,14 @@
 """Explicit, backed-up operational reset. Never removes the SDM master."""
 import hashlib
 import json
-import os
-import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
+from backend.security import require_api_key
 
 CONFIRMATION = "RESET TOTAL TANPA MASTER SDM"
 PRESERVED = {"master_data", "master_sdm", "master_unit_kerja", "master_jabatan", "master_skp_rules", "final_tukin_schema",
@@ -152,29 +151,21 @@ class ApplicationResetService:
 
 
 def create_router(db_path, jobs_path):
-    router = APIRouter(prefix='/api/admin/reset-operational', tags=['Administrative reset'])
-
-    def require_api_key(request: Request):
-        expected_key = os.environ.get('EVKIN_ANALYTICS_API_KEY')
-        if not expected_key:
-            raise HTTPException(503, 'EVKIN_ANALYTICS_API_KEY wajib diatur untuk reset operasional')
-        key = request.headers.get('x-api-key') or request.headers.get('authorization')
-        if key and key.lower().startswith('bearer '):
-            key = key.split(' ', 1)[1]
-        if not secrets.compare_digest(key or '', expected_key):
-            raise HTTPException(401, 'Unauthorized')
+    router = APIRouter(
+        prefix='/api/admin/reset-operational',
+        tags=['Administrative reset'],
+        dependencies=[Depends(require_api_key)],
+    )
 
     @router.get('/preview')
-    def preview(request: Request):
-        require_api_key(request)
+    def preview():
         try:
             return ApplicationResetService(db_path(), jobs_path()).preview()
         except (ValueError, OSError, duckdb.Error) as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @router.post('/confirm')
-    def confirm(payload: dict, request: Request):
-        require_api_key(request)
+    def confirm(payload: dict):
         try:
             return ApplicationResetService(db_path(), jobs_path()).confirm(payload)
         except (ValueError, OSError, duckdb.Error) as exc:

@@ -109,8 +109,8 @@
           ['progressYear','progressBank','progressProvince','progressCity','progressComponent','progressStage','progressBpkBatch'].forEach(id=>{document.getElementById(id).value='';});
           refreshDashboard(true);
         };
-        document.getElementById('progressExport').onclick=()=>window.open(new URL('/pengembalian/archive/progress/download?'+params(),EVKIN.exportBackend.apiBase),'_blank');
-        document.getElementById('progressOfficialExport').onclick=()=>{const p=params();p.set('official','true');window.open(new URL('/pengembalian/archive/progress/download?'+p,EVKIN.exportBackend.apiBase),'_blank');};
+        document.getElementById('progressExport').onclick=()=>EVKIN.exportBackend.downloadAuthenticated(new URL('/pengembalian/archive/progress/download?'+params(),EVKIN.exportBackend.apiBase));
+        document.getElementById('progressOfficialExport').onclick=()=>{const p=params();p.set('official','true');EVKIN.exportBackend.downloadAuthenticated(new URL('/pengembalian/archive/progress/download?'+p,EVKIN.exportBackend.apiBase));};
         document.getElementById('progressClearDatabase').onclick = async function () {
           if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) {
             EVKIN.toast('Backend belum aktif.', 'error');
@@ -489,7 +489,7 @@
         document.getElementById('dailyResult').innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>NIP</th><th>Nama</th><th>Tanggal</th><th>Nominal Awal</th><th>Nominal Penyesuaian</th><th>Selisih</th><th>Changed Fields</th><th>Status</th></tr></thead><tbody>${(json.rows || []).map(r => `<tr><td>${EVKIN.util.esc(r.nip || '')}</td><td>${EVKIN.util.esc(r.nama || '')}</td><td>${EVKIN.util.esc(r.tanggal || '')}</td><td>${r.nominal_awal || 0}</td><td>${r.nominal_penyesuaian || 0}</td><td>${r.selisih || 0}</td><td>${EVKIN.util.esc((r.changed_fields || []).join(', '))}</td><td>${EVKIN.util.esc(r.status || '')}</td></tr>`).join('')}</tbody></table></div>`;
       };
     };
-    document.getElementById('mpExport').onclick = () => window.open(new URL('/pengembalian/archive/download?source=DATA_FINAL', EVKIN.exportBackend.apiBase), '_blank');
+    document.getElementById('mpExport').onclick = () => EVKIN.exportBackend.downloadAuthenticated(new URL('/pengembalian/archive/download?source=DATA_FINAL', EVKIN.exportBackend.apiBase));
     document.getElementById('mpImportHistory').onclick = async function () {
       const cont = document.getElementById('mpContent');
       cont.innerHTML = `
@@ -1131,7 +1131,7 @@
             jenis_perubahan: document.getElementById('arcType').value
           });
           [...params].forEach(([key, value]) => { if (!value) params.delete(key); });
-          window.open(new URL('/pengembalian/archive/download?' + params.toString(), EVKIN.exportBackend.apiBase).toString(), '_blank');
+          EVKIN.exportBackend.downloadAuthenticated(new URL('/pengembalian/archive/download?' + params.toString(), EVKIN.exportBackend.apiBase).toString());
         }
         document.getElementById('arcDownloadAwal').onclick = () => download('DATA_AWAL', false);
         document.getElementById('arcDownloadPenyesuaian').onclick = () => download('DATA_PENYESUAIAN', false);

@@ -2,7 +2,8 @@
 from pathlib import Path
 
 import duckdb
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from backend.security import require_api_key
 
 
 PROTECTED_TABLES = frozenset({
@@ -79,7 +80,11 @@ class ModuleResetService:
 
 
 def create_router(db_path):
-    router = APIRouter(prefix='/api/admin/module-reset', tags=['Module data reset'])
+    router = APIRouter(
+        prefix='/api/admin/module-reset',
+        tags=['Module data reset'],
+        dependencies=[Depends(require_api_key)],
+    )
 
     @router.post('/{module_name}')
     def reset_module(module_name: str):

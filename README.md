@@ -12,10 +12,20 @@ browser dan **backend lokal DuckDB** untuk menyimpan data dan hasil perhitungan.
 ## 1. Cara Menjalankan Aplikasi
 
 1. Ekstrak paket ZIP.
-2. Jalankan **`RUN_EVKIN_HTTP.bat`** untuk memulai backend dan membuka aplikasi melalui HTTP lokal.
-3. Pastikan indikator **Backend aktif** sebelum menjalankan workflow. Dependensi Python harus tersedia (lihat `backend/requirements.txt`).
+2. Atur token lokal sebelum menjalankan aplikasi (PowerShell):
+   ```powershell
+   $env:EVKIN_API_KEY = '<token-lokal-yang-kuat>'
+   ```
+3. Jalankan **`RUN_EVKIN_HTTP.bat`** untuk memulai backend dan membuka aplikasi melalui HTTP lokal. Launcher meneruskan token ke tab EVKIN melalui fragmen URL, menyimpannya hanya di `sessionStorage`, lalu langsung membersihkan fragmen dari address bar.
+4. Pastikan indikator **Backend aktif** sebelum menjalankan workflow. Dependensi Python harus tersedia (lihat `backend/requirements.txt`).
    - Library Excel (SheetJS) dan ikon (Lucide) sudah **dibundel offline** di folder `assets/vendor/`.
-4. Konfigurasi dan hasil workflow disimpan di **DuckDB backend**. Refresh memuat kembali state dari backend.
+5. Konfigurasi dan hasil workflow disimpan di **DuckDB backend**. Refresh memuat kembali state dari backend.
+
+Konfigurasi keamanan opsional:
+
+- `EVKIN_ALLOWED_ORIGINS`: daftar origin eksplisit dipisahkan koma. Default mengikuti `EVKIN_HTTP_PORT` untuk `127.0.0.1` dan `localhost`.
+- `EVKIN_ALLOW_INSECURE_LOCAL_DEV=1`: bypass autentikasi yang hanya boleh digunakan secara eksplisit untuk test/development. Jangan gunakan dengan data riil.
+- `EVKIN_ANALYTICS_API_KEY`: nama lama yang masih diterima sebagai fallback bila `EVKIN_API_KEY` belum diatur; migrasikan ke `EVKIN_API_KEY`.
 
 > Struktur:
 > ```

@@ -183,6 +183,9 @@
     enabled: false,
     async check() {
       try {
+        if (EVKIN.exportBackend && EVKIN.exportBackend.registerAuthenticatedOrigin) {
+          EVKIN.exportBackend.registerAuthenticatedOrigin(this.baseUrl);
+        }
         const res = await fetch(this.baseUrl + '/health', { cache: 'no-store' });
         if (!res.ok) throw new Error('Backend tidak merespons');
         const data = await res.json();

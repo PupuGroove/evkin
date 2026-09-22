@@ -187,7 +187,7 @@
           }
           indicator.onclick = () => {
             if (f) EVKIN.toast('Server semifinal: ' + (f.verified ? 'terverifikasi' : 'belum') + (f.updated_at ? ' pada ' + f.updated_at : ''), 'info');
-            else if (EVKIN.exportBackend && EVKIN.exportBackend.analyticsBase) window.open(EVKIN.exportBackend.analyticsBase + '/workflow/flags?bulan=' + encodeURIComponent(S.month), '_blank');
+            else if (EVKIN.exportBackend && EVKIN.exportBackend.analyticsBase) EVKIN.exportBackend.openAuthenticated(EVKIN.exportBackend.analyticsBase + '/workflow/flags?bulan=' + encodeURIComponent(S.month));
           };
         } catch (err) {
           indicator.innerHTML = '<span class="pill gray">Server: -</span>';

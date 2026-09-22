@@ -89,37 +89,26 @@ def test_send_bpk_and_bank_and_results():
         conn.close()
 
 
-def test_send_bpk_requires_api_key_when_configured():
-    old_key = os.environ.get('EVKIN_ANALYTICS_API_KEY')
-    old_db = os.environ.get('EVKIN_DUCKDB_PATH')
-    os.environ['EVKIN_ANALYTICS_API_KEY'] = 'secret-key'
-    os.environ['EVKIN_DUCKDB_PATH'] = setup_temp_duckdb()
-    try:
-        import backend.main as main
-        import backend.pengembalian_api as api
-        importlib.reload(api)
-        importlib.reload(main)
+def test_send_bpk_requires_api_key_when_configured(monkeypatch):
+    monkeypatch.setenv('EVKIN_API_KEY', 'secret-key')
+    monkeypatch.delenv('EVKIN_ANALYTICS_API_KEY', raising=False)
+    monkeypatch.setenv('EVKIN_DUCKDB_PATH', setup_temp_duckdb())
+    import backend.main as main
+    import backend.pengembalian_api as api
+    importlib.reload(api)
+    importlib.reload(main)
 
-        client = TestClient(main.app)
-        forbidden = client.post('/pengembalian/send_bpk', json={'batch_name': 'unit-test', 'items': [{'case_id': 'CASE-99', 'nominal': 123}]})
-        assert forbidden.status_code == 401
-        progress_forbidden = client.get('/pengembalian/archive/progress')
-        assert progress_forbidden.status_code == 401
-        invalid_limit = client.get('/pengembalian/archive/progress?limit=1001',
-                                   headers={'x-api-key': 'secret-key'})
-        assert invalid_limit.status_code == 400
-        invalid_offset = client.get('/pengembalian/archive/progress?offset=-1',
-                                    headers={'x-api-key': 'secret-key'})
-        assert invalid_offset.status_code == 400
+    client = TestClient(main.app)
+    forbidden = client.post('/pengembalian/send_bpk', json={'batch_name': 'unit-test', 'items': [{'case_id': 'CASE-99', 'nominal': 123}]})
+    assert forbidden.status_code == 401
+    progress_forbidden = client.get('/pengembalian/archive/progress')
+    assert progress_forbidden.status_code == 401
+    invalid_limit = client.get('/pengembalian/archive/progress?limit=1001',
+                               headers={'X-EVKIN-API-Key': 'secret-key'})
+    assert invalid_limit.status_code == 400
+    invalid_offset = client.get('/pengembalian/archive/progress?offset=-1',
+                                headers={'X-EVKIN-API-Key': 'secret-key'})
+    assert invalid_offset.status_code == 400
 
-        allowed = client.post('/pengembalian/send_bpk', json={'batch_name': 'unit-test', 'items': [{'case_id': 'CASE-99', 'nominal': 123}]}, headers={'x-api-key': 'secret-key'})
-        assert allowed.status_code == 200
-    finally:
-        if old_key is None:
-            os.environ.pop('EVKIN_ANALYTICS_API_KEY', None)
-        else:
-            os.environ['EVKIN_ANALYTICS_API_KEY'] = old_key
-        if old_db is None:
-            os.environ.pop('EVKIN_DUCKDB_PATH', None)
-        else:
-            os.environ['EVKIN_DUCKDB_PATH'] = old_db
+    allowed = client.post('/pengembalian/send_bpk', json={'batch_name': 'unit-test', 'items': [{'case_id': 'CASE-99', 'nominal': 123}]}, headers={'X-EVKIN-API-Key': 'secret-key'})
+    assert allowed.status_code == 200

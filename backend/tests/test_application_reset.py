@@ -131,17 +131,19 @@ def test_duplicate_rows_changed_invalidate_preview(tmp_path):
         svc.confirm(payload)
 
 
-def test_api_preview_and_confirmation(tmp_path):
+def test_api_preview_and_confirmation(tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from backend.application_reset import create_router
     svc = service(tmp_path)
+    monkeypatch.setenv('EVKIN_API_KEY', 'reset-test-key')
+    headers = {'X-EVKIN-API-Key': 'reset-test-key'}
     app = FastAPI()
     app.include_router(create_router(lambda: str(svc.db_path), lambda: None))
     client = TestClient(app)
-    assert client.get('/api/admin/reset-operational/preview').json()['can_reset'] is True
-    assert client.post('/api/admin/reset-operational/confirm', json={}).status_code == 400
-    assert client.post('/api/admin/reset-operational/confirm', json=confirmation(svc)).status_code == 200
+    assert client.get('/api/admin/reset-operational/preview', headers=headers).json()['can_reset'] is True
+    assert client.post('/api/admin/reset-operational/confirm', json={}, headers=headers).status_code == 400
+    assert client.post('/api/admin/reset-operational/confirm', json=confirmation(svc), headers=headers).status_code == 200
 
 
 def test_reset_gate_rejects_other_writes(monkeypatch):

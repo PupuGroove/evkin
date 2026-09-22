@@ -24,6 +24,7 @@ from datetime import datetime
 import concurrent.futures
 from backend.runtime_guard import claim_database, database_job, serialize_database_requests
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
+from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 
 # Executor for background compute jobs
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='evkin-jobs')
@@ -36,11 +37,13 @@ INDEX_FILE = APP_ROOT / "index.html"
 
 app = FastAPI(title="EVKIN Export API", version="1.1.0")
 app.middleware('http')(serialize_database_requests)
+app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
 )
 
 @app.middleware("http")

@@ -17,7 +17,7 @@ function Wait-ListeningPortFree([int]$Port, [int]$TimeoutMilliseconds) {
     return $false
 }
 
-function Test-EvkinBackendProcess($Connection, $ProcessInfo, [int]$ExpectedPort, [bool]$HealthIsEvkin) {
+function Test-EvkinBackendProcess($Connection, $ProcessInfo, [int]$ExpectedPort, [string]$ExpectedProjectRoot, [bool]$HealthIsEvkin) {
     if (-not $ProcessInfo -or -not $HealthIsEvkin -or $Connection.LocalAddress -ne '127.0.0.1') { return $false }
     $executableName = [IO.Path]::GetFileName([string]$ProcessInfo.ExecutablePath)
     if ($executableName -notmatch '^python(?:w|\d+(?:\.\d+)*)?\.exe$') { return $false }
@@ -25,7 +25,11 @@ function Test-EvkinBackendProcess($Connection, $ProcessInfo, [int]$ExpectedPort,
     $hasUvicornEntrypoint = $commandLine -match '(?i)(?:^|\s)-m\s+uvicorn(?:\s|$)' -and
         $commandLine -match '(?i)(?:^|\s)backend\.evkin_export_api:app(?:\s|$)'
     $hasExpectedPort = $commandLine -match "(?i)(?:^|\s)--port(?:=|\s+)`"?$ExpectedPort`"?(?:\s|$)"
-    return $hasUvicornEntrypoint -and $hasExpectedPort
+    $hasLoopbackHost = $commandLine -match '(?i)(?:^|\s)--host(?:=|\s+)"?127\.0\.0\.1"?(?:\s|$)'
+    $hasAppDirectory = $commandLine -match '(?i)(?:^|\s)--app-dir(?:=|\s+)'
+    $hasCurrentProjectPath = $commandLine.IndexOf($ExpectedProjectRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if ($hasAppDirectory -and -not $hasCurrentProjectPath) { return $false }
+    return $hasUvicornEntrypoint -and $hasExpectedPort -and $hasLoopbackHost
 }
 
 if (-not $env:EVKIN_DUCKDB_PATH) { $env:EVKIN_DUCKDB_PATH = Join-Path $projectRoot 'backend\data\EVKIN_MASTER.duckdb' }
@@ -47,7 +51,7 @@ try {
         foreach ($listener in $listeners) {
             $ownerPid = [int]$listener.OwningProcess
             $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerPid" -ErrorAction SilentlyContinue
-            if (-not (Test-EvkinBackendProcess $listener $processInfo $port $healthIsEvkin)) {
+            if (-not (Test-EvkinBackendProcess $listener $processInfo $port $projectRoot $healthIsEvkin)) {
                 $processName = if ($processInfo) { $processInfo.Name } else { 'unknown' }
                 throw "Port $port sedang digunakan aplikasi lain (PID $ownerPid, process $processName). Tutup aplikasi tersebut atau ubah EVKIN_HTTP_PORT."
             }
@@ -56,9 +60,19 @@ try {
 
         Write-Host "Menghentikan backend EVKIN lama pada port $port..."
         foreach ($ownerPid in $verifiedOwners) {
-            Stop-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            $runningProcess = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($runningProcess) { $null = $runningProcess.CloseMainWindow() }
         }
-        if (-not (Wait-ListeningPortFree $port 5000)) {
+        if (-not (Wait-ListeningPortFree $port 1000)) {
+            $remainingListeners = @(Get-ListeningConnections $port)
+            foreach ($listener in $remainingListeners) {
+                $ownerPid = [int]$listener.OwningProcess
+                if ($verifiedOwners -contains $ownerPid) {
+                    Stop-Process -Id $ownerPid -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        if (-not (Wait-ListeningPortFree $port 4000)) {
             $remainingListeners = @(Get-ListeningConnections $port)
             foreach ($listener in $remainingListeners) {
                 $ownerPid = [int]$listener.OwningProcess

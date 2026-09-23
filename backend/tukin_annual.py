@@ -17,6 +17,7 @@ import uuid
 from calendar import monthrange
 from datetime import date, datetime
 from pathlib import Path
+from backend.workflow_readiness import WorkflowNotReadyError, validate_final_readiness
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 import duckdb
@@ -702,7 +703,7 @@ class TukinAnnualService:
                 applied += 1
         return {"status": "ok", "assessment_period": assessment, "applied": applied}
 
-    def capture_live(self, assessment: str, payment: str) -> dict[str, Any]:
+    def capture_live(self, assessment: str, payment: str, enforce_workflow: bool = False) -> dict[str, Any]:
         assessment, payment = _period(assessment), _period(payment)
         if payment != self._next_month(assessment):
             raise ValueError('Periode pembayaran harus satu bulan setelah periode penilaian')
@@ -710,6 +711,10 @@ class TukinAnnualService:
             current = conn.execute('SELECT status FROM tukin_period WHERE assessment_period=?', [assessment]).fetchone()
             if current and current[0] in {'LOCKED','HISTORICAL_LOCKED','PAID'}:
                 raise ValueError('Periode terkunci; hasil gabungan tidak boleh menimpa arsip pembayaran')
+        if enforce_workflow:
+            readiness = validate_final_readiness(self.db_path, assessment)
+            if not readiness["ready"]:
+                raise WorkflowNotReadyError(readiness)
         self.ensure_period(assessment, payment, "LIVE")
         year, month_number = map(int, assessment.split("-"))
         with self.connect() as conn:
@@ -1560,7 +1565,17 @@ def create_router(db_path_getter: Callable[[], str]) -> APIRouter:
 
     @router.post("/periods/capture-live")
     def capture_live(payload: dict[str, Any]):
-        try: return service().capture_live(_text(payload.get("assessment_period")), _text(payload.get("payment_period")))
+        try: return service().capture_live(
+            _text(payload.get("assessment_period")), _text(payload.get("payment_period")), enforce_workflow=True
+        )
+        except WorkflowNotReadyError as exc:
+            raise HTTPException(status_code=409, detail={
+                "code": "WORKFLOW_NOT_READY",
+                "message": str(exc),
+                "period": exc.result["period"],
+                "blocking_reasons": exc.result["blocking_reasons"],
+                "checks": exc.result["checks"],
+            }) from exc
         except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/periods/status")

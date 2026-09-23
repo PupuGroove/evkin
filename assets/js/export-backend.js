@@ -415,6 +415,7 @@
 
   // Lightweight mark: avoid resending the full workflow payload when only the semifinal verified flag changes.
   EVKIN.exportBackend.markSemifinalVerified = async function (opts = {}) {
+    if (typeof opts === 'string') opts = { bulan: opts };
     const { bulan = '2026-08', verified = true, apiBase = backend.apiBase, timeoutMs = 8000 } = opts;
     const url = new URL('/api/workflow/mark-semifinal', apiBase);
     const controller = new AbortController();
@@ -428,9 +429,12 @@
       });
       clearTimeout(id);
       if (!response.ok) {
-        const text = await response.text().catch(() => '<no body>');
-        console.error('markSemifinalVerified failed', url.toString(), 'status', response.status, 'body:', text);
-        throw new Error(text || 'Gagal menandai verifikasi semifinal di backend');
+        const data = await response.json().catch(() => ({}));
+        const detail = data.detail || data;
+        const reasons = detail.blocking_reasons || (detail.message ? [detail.message] : []);
+        const error = new Error(reasons.join(' ') || 'Gagal menyimpan verifikasi Semi Final.');
+        error.workflow = detail;
+        throw error;
       }
       return response.json();
     } catch (err) {

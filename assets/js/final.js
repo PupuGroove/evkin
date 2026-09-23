@@ -335,10 +335,33 @@
           body: JSON.stringify({ assessment_period: S.month, payment_period: nextPaymentPeriod(S.month) })
         });
         const result = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(result.detail || 'Gagal menyimpan hasil final');
+        if (!response.ok) {
+          const detail = result.detail || result;
+          const reasons = detail.blocking_reasons || (detail.message ? [detail.message] : []);
+          const error = new Error(reasons.length ? reasons.join(' ') : 'Gagal menyimpan hasil final');
+          error.workflow = detail;
+          throw error;
+        }
         EVKIN.toast(`${result.captured || 0} hasil Final berhasil disimpan ke database.`, 'success');
       } catch (error) {
-        EVKIN.toast(error.message || 'Gagal menyimpan hasil final.', 'error');
+        const reasons = error.workflow && error.workflow.blocking_reasons;
+        if (reasons && reasons.length) {
+          const checks = error.workflow.checks || {};
+          const label = {
+            harian_available: 'Hitung Harian tersedia',
+            semifinal_available: 'Semi Final tersedia',
+            semifinal_verified: 'Verifikasi Semi Final tercatat',
+            rekap_available: 'Rekap SDM tersedia',
+            rekap_consistent: 'Rekap SDM konsisten'
+          };
+          const status = Object.entries(label).map(([key, text]) =>
+            `${checks[key] ? '✓' : '✗'} ${text}`).join(' · ');
+          EVKIN.toast(reasons.join(' '), 'error');
+          const statusNode = el.querySelector('#finalExportStatus');
+          if (statusNode) statusNode.textContent = `Final Tukin belum dapat dibuat. ${status}. Perbaiki item bertanda ✗ lalu coba lagi.`;
+        } else {
+          EVKIN.toast(error.message || 'Gagal menyimpan hasil final.', 'error');
+        }
       } finally {
         saveFinalResult.disabled = false;
       }

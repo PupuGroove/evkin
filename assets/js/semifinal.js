@@ -142,10 +142,13 @@
           if (seen.has(key)) throw new Error('Masih ada duplikat NIP/tanggal. Koreksi baris duplikat sebelum verifikasi.');
           seen.add(key);
         }
-        S.semifinalVerified = true;
         S.semifinal = S.daily.map(row => ({...row}));
         if (EVKIN.progress) EVKIN.progress({title: 'Verifikasi Semi Final', percent: 70, message: 'Menyimpan status verifikasi...'});
         await EVKIN.syncBackendWorkflow(undefined, {derivedOnly:true});
+        if (EVKIN.exportBackend && EVKIN.exportBackend.markSemifinalVerified) {
+          await EVKIN.exportBackend.markSemifinalVerified(S.month);
+        }
+        S.semifinalVerified = true;
         if (EVKIN.progress) EVKIN.progress({title: 'Verifikasi Semi Final', percent: 100, message: 'Semi Final berhasil diverifikasi.', state: 'done'});
         EVKIN.auditMod.logStage('semifinal', 'VERIFIED');
         EVKIN.toast('Semi Final terverifikasi dan tersimpan — Rekap SDM terbuka');

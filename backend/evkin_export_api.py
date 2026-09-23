@@ -24,6 +24,7 @@ from datetime import datetime
 import concurrent.futures
 from backend.runtime_guard import claim_database, database_job, serialize_database_requests
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
+from backend.workflow_readiness import record_verification
 from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 from backend.schema_sync import create_table_from_relation, insert_relation_by_name
 from backend.reset_service import RESET_PROFILES, ResetService
@@ -956,38 +957,38 @@ def mark_semifinal(payload: dict[str, Any]):
     verified = bool(payload.get('verified'))
     key = f'semifinal:{bulan}'
 
-    # Write lightweight flag into SQLite for quick metadata
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", bulan):
+        raise HTTPException(400, "Periode harus berformat YYYY-MM.")
+    if verified:
+        try:
+            result = record_verification(DUCKDB_PATH, bulan)
+        except ValueError as exc:
+            raise HTTPException(409, {"code": "WORKFLOW_NOT_READY", "message": str(exc),
+                                      "blocking_reasons": [str(exc)]}) from exc
+        except Exception as exc:
+            raise HTTPException(503, "Gagal menyimpan status semifinal ke DuckDB.") from exc
+    else:
+        import duckdb as _d_local
+        with _d_local.connect(DUCKDB_PATH) as dconn_local:
+            dconn_local.execute('CREATE TABLE IF NOT EXISTS workflow_flags (k TEXT PRIMARY KEY, verified INTEGER, updated_at TEXT)')
+            dconn_local.execute(
+                "INSERT OR REPLACE INTO workflow_flags (k, verified, updated_at) VALUES (?, 0, ?)",
+                [key, datetime.utcnow().isoformat()],
+            )
+        result = {"status": "ok", "bulan": bulan, "verified": False}
+
+    # Keep the legacy SQLite flag as a compatibility projection only after the
+    # canonical DuckDB transaction has committed.
     conn = get_connection()
     try:
         conn.execute('CREATE TABLE IF NOT EXISTS workflow_flags (k TEXT PRIMARY KEY, v TEXT, updated_at TEXT)')
-        conn.execute('REPLACE INTO workflow_flags (k, v, updated_at) VALUES (?, ?, ?)', (key, '1' if verified else '0', datetime.utcnow().isoformat()))
+        conn.execute('REPLACE INTO workflow_flags (k, v, updated_at) VALUES (?, ?, ?)',
+                     (key, '1' if verified else '0', datetime.utcnow().isoformat()))
         conn.commit()
     finally:
         conn.close()
 
-    # Also write into DuckDB so workflow metadata lives in the same EVKIN_ABSENSI_DB
-    # Complete the canonical write before reporting success to the browser.
-    def _write_flag_to_duckdb(k_local: str, verified_local: bool):
-        try:
-            import duckdb as _d_local
-            dconn_local = _d_local.connect(DUCKDB_PATH)
-            try:
-                dconn_local.execute('CREATE TABLE IF NOT EXISTS workflow_flags (k TEXT PRIMARY KEY, verified INTEGER, updated_at TEXT)')
-                dconn_local.execute('BEGIN TRANSACTION')
-                dconn_local.execute('DELETE FROM workflow_flags WHERE k = ?', (k_local,))
-                dconn_local.execute("INSERT INTO workflow_flags (k, verified, updated_at) VALUES (?, ?, ?)", (k_local, 1 if verified_local else 0, datetime.utcnow().isoformat()))
-                dconn_local.commit()
-            finally:
-                try:
-                    dconn_local.close()
-                except Exception:
-                    pass
-        except Exception as e:
-            raise HTTPException(503, 'Gagal menyimpan status semifinal ke DuckDB') from e
-
-    _write_flag_to_duckdb(key, verified)
-
-    return {"status": "ok", "bulan": bulan, "verified": verified}
+    return {**result, "bulan": bulan, "verified": verified}
 
 
 @app.get("/api/workflow/flags")

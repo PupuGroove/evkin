@@ -228,6 +228,15 @@
       state.importStats = {...(workflow.importStats || {}), months, totalRecord:state.data.length,
         totalRaw:state.raw.length, totalSDM:new Set(state.data.map(row=>row.nip)).size};
       state.semifinalVerified = workflow.semifinalVerified === true && Array.isArray(data.daily_data) && data.daily_data.length > 0;
+      if (EVKIN.exportBackend && EVKIN.exportBackend.getWorkflowFlags && state.month) {
+        try {
+          const flags = await EVKIN.exportBackend.getWorkflowFlags(state.month);
+          state.semifinalVerified = !!(flags.flags && flags.flags['semifinal:' + state.month] && flags.flags['semifinal:' + state.month].verified);
+        } catch (error) {
+          console.warn('Status verifikasi server tidak dapat dimuat:', error);
+          state.semifinalVerified = false;
+        }
+      }
       state.daily = Array.isArray(data.daily_data) ? data.daily_data : [];
       state.rekap = Array.isArray(data.rekap_sdm) ? data.rekap_sdm : [];
       state.semifinal = Array.isArray(data.semifinal) ? data.semifinal : [];

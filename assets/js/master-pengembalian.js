@@ -1,5 +1,6 @@
 (function () {
   const EVKIN = window.EVKIN;
+  const normalizeProgressPage = page => Math.max(Number(page) || 0, 0);
   EVKIN.masterPengembalianMod = {};
 
   function badge(id) { return `<span class="module-badge">${id}</span>`; }
@@ -118,7 +119,7 @@
         document.getElementById('progressPrev').onclick=()=>{progressPage=Math.max(progressPage-1,0);loadProgress(progressPage);};
         document.getElementById('progressNext').onclick=()=>{progressPage+=1;loadProgress(progressPage);};
         };
-        const loadProgress = async page => {const p=params();p.set('limit',progressSize);p.set('offset',Math.max(page,0)*progressSize);const [res,kpiRes,dashboardRes]=await Promise.all([fetch(new URL('/pengembalian/archive/progress/sdm?'+p,EVKIN.exportBackend.apiBase)),fetch(new URL('/pengembalian/archive/progress/kpi-summary?'+params(),EVKIN.exportBackend.apiBase)),fetch(new URL('/pengembalian/archive/progress/operational-dashboard?'+params(),EVKIN.exportBackend.apiBase))]);const data=await res.json(),kpi=await kpiRes.json(),dashboard=await dashboardRes.json();if(!res.ok||!kpiRes.ok||!dashboardRes.ok)throw new Error(data.detail||kpi.detail||dashboard.detail||'Gagal memuat progress');showProgress(data,kpi,dashboard);};
+        const loadProgress = async page => {progressPage=normalizeProgressPage(page);const p=params();p.set('limit',progressSize);p.set('offset',progressPage*progressSize);const [res,kpiRes,dashboardRes]=await Promise.all([fetch(new URL('/pengembalian/archive/progress/sdm?'+p,EVKIN.exportBackend.apiBase)),fetch(new URL('/pengembalian/archive/progress/kpi-summary?'+params(),EVKIN.exportBackend.apiBase)),fetch(new URL('/pengembalian/archive/progress/operational-dashboard?'+params(),EVKIN.exportBackend.apiBase))]);const data=await res.json(),kpi=await kpiRes.json(),dashboard=await dashboardRes.json();if(!res.ok||!kpiRes.ok||!dashboardRes.ok)throw new Error(data.detail||kpi.detail||dashboard.detail||'Gagal memuat progress');showProgress(data,kpi,dashboard);};
         const replaceOptions = (id, values, label) => {
           const select=document.getElementById(id);if(!select)return;
           const current=select.value;

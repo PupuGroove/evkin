@@ -193,11 +193,34 @@ def test_delete_absensi_requires_confirmation_and_preserves_other_owners(isolate
 
 
 def test_delete_absensi_rolls_back_all_tables_on_failure(isolated, monkeypatch):
-    # A view cannot be deleted from; use it to force a failure after raw_import was cleared.
     with duckdb.connect(isolated) as conn:
-        conn.execute('CREATE VIEW failing_delete AS SELECT 1 AS value')
-    monkeypatch.setattr(api, 'WORKFLOW_WRITABLE', {'raw_import': 'raw_import', 'fail': 'failing_delete'})
-    with pytest.raises(duckdb.Error):
+        conn.execute("CREATE OR REPLACE TABLE hitung_harian AS SELECT 'DAILY' nip")
+    original = api.ResetService._delete_table
+    def fail_after_delete(service, conn, item):
+        original(service, conn, item)
+        if item['table'] == 'raw_import':
+            raise ValueError('Simulasi kegagalan legacy reset')
+    monkeypatch.setattr(api.ResetService, '_delete_table', fail_after_delete)
+    with pytest.raises(HTTPException, match='Simulasi'):
         api.delete_absensi_workflow({'confirmation': 'HAPUS ABSENSI'})
     with duckdb.connect(isolated) as conn:
         assert conn.execute('SELECT COUNT(*) FROM raw_import').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM hitung_harian').fetchone()[0] == 1
+
+
+def test_legacy_backend_reset_uses_workflow_results_profile(isolated):
+    with duckdb.connect(isolated) as conn:
+        conn.execute("CREATE OR REPLACE TABLE hitung_harian AS SELECT 'DAILY' nip")
+    preview = api.preview_legacy_workflow_reset()
+    result = api.reset_backend_workflow({
+        'preview_token': preview['preview_token'],
+        'confirmation': preview['confirmation'],
+    })
+    assert result['target_tables'] == preview['target_tables']
+    with duckdb.connect(isolated) as conn:
+        assert conn.execute('SELECT count(*) FROM hitung_harian').fetchone() == (0,)
+        assert conn.execute('SELECT count(*) FROM raw_import').fetchone() == (1,)
+        audit = json.loads(conn.execute(
+            'SELECT manifest_json FROM application_reset_audit'
+        ).fetchone()[0])
+        assert audit['source'] == 'LEGACY_WORKFLOW_RESET_API'

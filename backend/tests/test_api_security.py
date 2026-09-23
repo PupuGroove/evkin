@@ -114,9 +114,15 @@ def test_module_reset_requires_key_and_uses_existing_reset_logic(tmp_path, monke
     app.include_router(create_module_reset_router(lambda: str(db_path)))
     client = TestClient(app)
     assert client.post("/api/admin/module-reset/workflow").status_code == 401
+    assert client.get("/api/admin/module-reset/workflow/preview").status_code == 401
+    preview = client.get(
+        "/api/admin/module-reset/workflow/preview",
+        headers={API_KEY_HEADER: "unit-test-key"},
+    ).json()
     response = client.post(
         "/api/admin/module-reset/workflow",
         headers={API_KEY_HEADER: "unit-test-key"},
+        json={"preview_token": preview["preview_token"], "confirmation": preview["confirmation"]},
     )
     assert response.status_code == 200
     assert response.json()["deleted"]["raw_import"] == 1

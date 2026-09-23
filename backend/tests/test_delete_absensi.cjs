@@ -5,9 +5,13 @@ async function main(){
   const E={};let ok=false,deleteCalls=0;const cleared=[];
   const sandbox={window:{EVKIN:E},console,URL,Date,Math,
     fetch:async(url,options)=>{
-      if(String(url).endsWith('/delete-absensi')){
-        deleteCalls++;assert.equal(JSON.parse(options.body).confirmation,'HAPUS ABSENSI');
-        return {ok,json:async()=>({detail:'Simulated failure',deleted_rows:7})};
+      if(String(url).endsWith('/module-reset/workflow/preview')){
+        return {ok:true,json:async()=>({preview_token:'preview',confirmation:'RESET WORKFLOW'})};
+      }
+      if(String(url).endsWith('/module-reset/workflow')){
+        deleteCalls++;const body=JSON.parse(options.body);
+        assert.equal(body.preview_token,'preview');assert.equal(body.confirmation,'RESET WORKFLOW');
+        return {ok,json:async()=>ok?({deleted_rows:10}):({detail:'Simulated failure'})};
       }
       return {ok:true,json:async()=>({data:{config:null,raw_import:[],daily_data:[],final_absensi:[]}})};
     }};

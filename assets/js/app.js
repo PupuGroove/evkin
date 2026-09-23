@@ -317,9 +317,10 @@
 
   EVKIN.resetModuleData = async function (moduleName, label, stores, refresh) {
     if (!EVKIN.requireBackend('Aktifkan backend sebelum menghapus data modul.')) return null;
+    const preview = await EVKIN.previewResetProfile(moduleName);
     const dialog = document.createElement('dialog');
     dialog.style.cssText = 'max-width:560px;width:90%;padding:24px;border-radius:12px';
-    dialog.innerHTML = `<h2>Hapus seluruh data ${EVKIN.util.esc(label)}?</h2><p>Data ${EVKIN.util.esc(label)} akan dikosongkan dan tidak dapat dikembalikan.</p><p>Master SDM dan Master Pengembalian tidak akan terhapus.</p><div class="actions-row"><button type="button" id="moduleResetCancel" class="btn btn-secondary">Batal</button><button type="button" id="moduleResetConfirm" class="btn btn-danger">Hapus</button></div>`;
+    dialog.innerHTML = `<h2>Hapus seluruh data ${EVKIN.util.esc(label)}?</h2><p>${preview.deleted_rows || 0} baris pada ${(preview.target_tables || []).length} tabel akan dikosongkan.</p><p>${EVKIN.util.esc(preview.preserved_note || 'Master penting tetap disimpan.')}</p><details><summary>Rincian target</summary><ul>${(preview.tables || []).map(item => `<li>${EVKIN.util.esc(item.table)}: ${item.rows || 0} baris</li>`).join('')}</ul></details><div class="actions-row"><button type="button" id="moduleResetCancel" class="btn btn-secondary">Batal</button><button type="button" id="moduleResetConfirm" class="btn btn-danger">Hapus</button></div>`;
     document.body.appendChild(dialog);
     const confirmed = await new Promise(resolve => {
       dialog.showModal();
@@ -329,9 +330,7 @@
     });
     dialog.remove();
     if (!confirmed) return null;
-    const response = await fetch(new URL(`/api/admin/module-reset/${encodeURIComponent(moduleName)}`, EVKIN.exportBackend.apiBase), { method: 'POST' });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.detail || `Gagal menghapus data ${label}.`);
+    const result = await EVKIN.executeResetProfile(moduleName, preview, {reason:`Reset modul ${label} dari UI`});
     if (EVKIN.db && EVKIN.db.replaceStore) await Promise.all((stores || []).map(store => EVKIN.db.replaceStore(store, [])));
     if (typeof refresh === 'function') await refresh(result);
     EVKIN.toast(`${label} berhasil dihapus (${result.deleted_rows || 0} baris).`, 'success');

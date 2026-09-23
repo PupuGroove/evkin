@@ -143,24 +143,14 @@
       }
     };
     el.querySelector('#backendWorkflowResetBtn').onclick = async () => {
-      if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) {
-        EVKIN.toast('Backend EVKIN belum aktif.', 'error');
-        return;
-      }
-      if (!confirm('Reset database workflow di backend? Data Final/rekap turunan akan dihapus, tetapi Master SDM dan source data tetap dipertahankan.')) return;
-      if (!confirm('Konfirmasi terakhir: hapus hasil workflow turunan dari backend?')) return;
       const button = el.querySelector('#backendWorkflowResetBtn');
       button.disabled = true;
       try {
-        const response = await fetch(new URL('/api/workflow/reset-backend', EVKIN.exportBackend.apiBase), {
-          method: 'POST',
-          cache: 'no-store'
+        await EVKIN.resetModuleData('workflow_results', 'Hasil Workflow Backend', ['daily_data','rekap_sdm','final_absensi'], async result => {
+          if (!await EVKIN.load()) throw new Error('Reset selesai, tetapi pemuatan ulang gagal. Muat ulang halaman.');
+          EVKIN.go('dashboard');
+          return result;
         });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(result.detail || 'Reset database workflow backend gagal');
-        if (!await EVKIN.load()) throw new Error('Reset selesai, tetapi pemuatan ulang gagal. Muat ulang halaman.');
-        EVKIN.toast(`${result.deleted_rows || 0} record workflow backend dihapus. Master SDM dan source data tetap aman.`, 'success');
-        EVKIN.go('dashboard');
       } catch (error) {
         console.error('Reset database workflow backend gagal:', error);
         EVKIN.toast(error.message || 'Reset database workflow backend gagal.', 'error');

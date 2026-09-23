@@ -6,8 +6,13 @@ async function main() {
   const E = {};
   let ok = true;
   const sandbox = {window:{EVKIN:E},console,Date,Math,URL,setTimeout,clearTimeout,
-    document:{addEventListener(){}},
-    fetch:async()=>({ok,json:async()=>({data:payload})})};
+    document:{addEventListener(){},getElementById(){return null},body:{appendChild(){}},
+      createElement(){return {setAttribute(){},remove(){},classList:{add(){},remove(){},contains(){return false}}}}},
+    fetch:async(url,options)=>{
+      if(String(url).endsWith('/module-reset/workflow_results/preview')) return {ok:true,json:async()=>({preview_token:'preview',confirmation:'RESET WORKFLOW RESULTS'})};
+      if(String(url).endsWith('/module-reset/workflow_results')) return {ok,json:async()=>ok?({deleted_rows:1}):({detail:'Reset workflow gagal'})};
+      return {ok:true,json:async()=>({data:payload})};
+    }};
   for(const name of ['utils','data','state','import','calc']) vm.runInNewContext(fs.readFileSync(`assets/js/${name}.js`,'utf8'),sandbox);
   E.exportBackend={enabled:true,apiBase:'http://localhost:8000'};
   const raw=[{NIP:'001234567890123456',Nama:'Tes',Tanggal:'03/08/2026','Jam Masuk':'07:30','Jam Pulang':'16:00'}];

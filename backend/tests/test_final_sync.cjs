@@ -3,11 +3,13 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 async function main() {
   let payload;
-  const E = {state: {config: {masterPegawai: [{nip: 'MASTER'}]}, raw: [{source: true}],
+  const E = {util:{esc:value=>String(value??'')},state: {config: {masterPegawai: [{nip: 'MASTER'}]}, raw: [{source: true}],
     daily: [{daily: true}], final: [{nip: 'WORKFLOW', tukin: 2000000, komponen: 600000, potPct: 10, nominal: 60000}]},
     exportBackend: {enabled: true, syncWorkflow: async data => {payload = data; return {counts: {}};}}};
   vm.runInNewContext(fs.readFileSync('assets/js/app.js', 'utf8'), {
-    window: {EVKIN: E}, document: {addEventListener() {}}, console
+    window: {EVKIN: E}, document: {addEventListener() {},getElementById(){return null},body:{appendChild(){}},
+      createElement(){return {setAttribute(){},remove(){},classList:{add(){},remove(){},contains(){return false}}}}},
+    console,setTimeout,clearTimeout
   });
   await E.syncBackendWorkflow(undefined, {finalOnly: true});
   assert.deepEqual(Object.keys(payload).sort(), ['final_absensi','final_combined_skp','final_kombinasi','final_skp']);

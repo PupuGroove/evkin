@@ -260,12 +260,35 @@
     } catch (e) { state.workflowLoadError = 'Data workflow gagal dimuat: ' + e.message; console.warn('Gagal baca state dari master database', e); return false; }
   };
 
+  EVKIN.previewResetProfile = async function (profile) {
+    const response = await fetch(new URL(`/api/admin/module-reset/${encodeURIComponent(profile)}/preview`, EVKIN.exportBackend.apiBase), {cache:'no-store'});
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || 'Preview reset gagal.');
+    return result;
+  };
+
+  EVKIN.executeResetProfile = async function (profile, preview, details = {}) {
+    const response = await fetch(new URL(`/api/admin/module-reset/${encodeURIComponent(profile)}`, EVKIN.exportBackend.apiBase), {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+        preview_token:preview.preview_token, confirmation:preview.confirmation,
+        actor:details.actor || 'EVKIN_LOCAL_UI', reason:details.reason || `Reset ${profile}`
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || 'Reset gagal. Data aplikasi tetap dipertahankan.');
+    return result;
+  };
+
+  EVKIN.requestResetProfile = async function (profile, details = {}) {
+    const preview = await EVKIN.previewResetProfile(profile);
+    return EVKIN.executeResetProfile(profile, preview, details);
+  };
+
   EVKIN.resetAll = async function () {
     if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) {
       throw new Error('Aktifkan backend sebelum mereset workflow.');
     }
-    const response = await fetch(new URL('/api/admin/module-reset/workflow', EVKIN.exportBackend.apiBase).toString(), { method: 'POST' });
-    if (!response.ok) throw new Error('Reset workflow gagal. Data aplikasi tetap dipertahankan.');
+    await EVKIN.requestResetProfile('workflow_results', {reason:'Reset hasil workflow dari UI'});
     if (!await EVKIN.load()) throw new Error('Reset selesai, tetapi pemuatan ulang gagal. Muat ulang halaman.');
     state.harianPage = state.rekapPage = state.semifinalPage = state.finalPage = 0;
   };
@@ -279,9 +302,7 @@
     try {
       // Finish previously queued writes so they cannot restore data after deletion.
       await EVKIN.exportBackend.syncQueue;
-      const response = await fetch(new URL('/api/admin/module-reset/workflow', EVKIN.exportBackend.apiBase), { method:'POST' });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.detail || 'Penghapusan data backend gagal.');
+      const result = await EVKIN.requestResetProfile('workflow', {reason:'Reset seluruh workflow dari UI'});
       if (!await EVKIN.load()) throw new Error('Data backend sudah dihapus. Muat ulang halaman karena pemuatan state gagal.');
       state.harianPage = state.rekapPage = state.semifinalPage = state.finalPage = 0;
       state.reconciliationReviewed = false;

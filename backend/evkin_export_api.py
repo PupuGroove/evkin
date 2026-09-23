@@ -26,6 +26,7 @@ from backend.runtime_guard import claim_database, database_job, serialize_databa
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
 from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 from backend.schema_sync import create_table_from_relation, insert_relation_by_name
+from backend.reset_service import RESET_PROFILES, ResetService
 
 # Executor for background compute jobs
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='evkin-jobs')
@@ -198,15 +199,7 @@ WORKFLOW_TABLES = {
 }
 # Derived workflow data only. Master SDM, workflow configuration, and imported
 # source data are intentionally excluded from backend workflow reset.
-RESETTABLE_WORKFLOW_TABLES = (
-    "hitung_harian",
-    "rekap_sdm",
-    "anomali",
-    "final_absensi",
-    "final_skp",
-    "final_kombinasi",
-    "final_combined_skp",
-)
+RESETTABLE_WORKFLOW_TABLES = RESET_PROFILES['workflow_results'].tables
 
 # Canonical SDM and archived Tukin are owned by their dedicated services.
 # The legacy master_data projection is read-only to workflow clients.
@@ -848,74 +841,49 @@ def delete_master_sdm(payload: dict[str, Any]) -> dict:
     return {"status": "ok", "deleted": 0, "deactivated": deactivated, "recoverable": True}
 
 
-@app.post("/api/workflow/reset")
-def reset_workflow() -> dict:
-    """Clear derived workflow records while preserving Master SDM and source data."""
-    ensure_duckdb_master_schema()
-    import duckdb as _duckdb
-    dconn = _duckdb.connect(DUCKDB_PATH)
-    deleted: dict[str, int] = {}
+@app.get("/api/workflow/reset/preview")
+@app.get("/api/workflow/reset-backend/preview")
+def preview_legacy_workflow_reset() -> dict:
+    """Legacy-path preview backed by the canonical workflow-results profile."""
     try:
-        dconn.execute("BEGIN TRANSACTION")
-        try:
-            existing = {
-                row[0] for row in dconn.execute(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
-                ).fetchall()
-            }
-            for table in RESETTABLE_WORKFLOW_TABLES:
-                if table not in existing:
-                    deleted[table] = 0
-                    continue
-                count = int(dconn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-                dconn.execute(f'DELETE FROM "{table}"')
-                deleted[table] = count
-            dconn.execute("COMMIT")
-        except Exception:
-            dconn.execute("ROLLBACK")
-            raise
-    finally:
-        dconn.close()
-    return {
-        "status": "ok",
-        "message": "Derived workflow backend reset; Master SDM and source data preserved",
-        "deleted": deleted,
-        "deleted_rows": sum(deleted.values()),
-        "preserved": ["master_data", "raw_import", "workflow_config"],
-    }
+        return ResetService(DUCKDB_PATH).preview('workflow_results')
+    except (ValueError, OSError, duckdb.Error) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/workflow/reset")
+def reset_workflow(payload: dict[str, Any] | None = None) -> dict:
+    """Legacy adapter: reset derived workflow data through ResetService."""
+    try:
+        return ResetService(DUCKDB_PATH).execute(
+            'workflow_results', payload or {}, source='LEGACY_WORKFLOW_RESET_API'
+        )
+    except (ValueError, OSError, duckdb.Error) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/workflow/reset-backend")
-def reset_backend_workflow() -> dict:
+def reset_backend_workflow(payload: dict[str, Any] | None = None) -> dict:
     """Named endpoint for the UI's explicit backend workflow reset action."""
-    return reset_workflow()
+    return reset_workflow(payload)
 
 
 @app.post("/api/workflow/delete-absensi")
 def delete_absensi_workflow(payload: dict[str, Any]) -> dict:
-    """Delete only attendance-owned data, preserving schemas and other modules."""
+    """Legacy phrase adapter for the canonical full-workflow reset profile."""
     if payload.get('confirmation') != 'HAPUS ABSENSI':
         raise HTTPException(status_code=400, detail='Konfirmasi HAPUS ABSENSI diperlukan.')
-    ensure_duckdb_master_schema()
-    import duckdb as _duckdb
-    deleted = {}
-    with _duckdb.connect(DUCKDB_PATH) as conn:
-        conn.execute('BEGIN TRANSACTION')
-        try:
-            existing = {row[0] for row in conn.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
-            ).fetchall()}
-            for table in dict.fromkeys(RESETTABLE_WORKFLOW_TABLES):
-                deleted[table] = 0
-                if table in existing:
-                    deleted[table] = int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-                    conn.execute(f'DELETE FROM "{table}"')
-            conn.execute('COMMIT')
-        except Exception:
-            conn.execute('ROLLBACK')
-            raise
-    return {'status': 'ok', 'deleted': deleted, 'deleted_rows': sum(deleted.values()),
-            'message': 'Data backend workflow absensi dihapus. Master dan arsip modul lain tetap dipertahankan.'}
+    service = ResetService(DUCKDB_PATH)
+    plan = service.preview('workflow')
+    try:
+        return service.execute('workflow', {
+            'preview_token': plan['preview_token'],
+            'confirmation': plan['confirmation'],
+            'actor': 'LEGACY_WORKFLOW_API',
+            'reason': 'Compatibility reset HAPUS ABSENSI',
+        }, source='LEGACY_DELETE_ABSENSI_API')
+    except (ValueError, OSError, duckdb.Error) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/workflow/sync-table")

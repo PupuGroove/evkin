@@ -21,6 +21,44 @@ browser dan **backend lokal DuckDB** untuk menyimpan data dan hasil perhitungan.
    - Library Excel (SheetJS) dan ikon (Lucide) sudah **dibundel offline** di folder `assets/vendor/`.
 5. Konfigurasi dan hasil workflow disimpan di **DuckDB backend**. Refresh memuat kembali state dari backend.
 
+### Setup Python reproducible
+
+Gunakan Python 3.14 dan environment lokal terpisah:
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python -m pip install -r backend\requirements.txt
+```
+
+Untuk development dan test, gunakan `backend\requirements-dev.txt`, yang juga memasang dependency runtime.
+Dependency langsung dan transitif dikunci oleh `backend\requirements-lock.txt`:
+
+```powershell
+.\.venv\Scripts\python -m pip install -r backend\requirements-dev.txt
+```
+
+### Quality checks
+
+Fast regression Python lokal yang sama dengan CI dapat dijalankan dengan:
+
+```powershell
+.\.venv\Scripts\python backend\tools\run_fast_python_tests.py
+```
+
+CI Windows memeriksa dependency pinned, registry migration,
+Python compile, security/reset/schema-sync/pengembalian/core workflow, seluruh test frontend,
+dan memastikan runtime database/log/export/`.env` tidak ikut di-track. Full Python regression
+tersedia melalui GitHub Actions `workflow_dispatch` dengan opsi `full_regression`.
+
+Sebelum menjalankan migration, validasi registry tanpa menyentuh database:
+
+```powershell
+py -3.14 backend\migrations\migrate.py --validate-only
+```
+
+Nama migration baru wajib mengikuti `NNN_description.py` dan nomor versinya wajib unik.
+Collision historis yang dipertahankan validator dibatasi pada pasangan nama file yang eksplisit.
+
 Konfigurasi keamanan opsional:
 
 - `EVKIN_ALLOWED_ORIGINS`: daftar origin eksplisit dipisahkan koma. Default mengikuti `EVKIN_HTTP_PORT` untuk `127.0.0.1` dan `localhost`.

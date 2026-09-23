@@ -1,0 +1,81 @@
+name: EVKIN CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_regression:
+        description: Run the complete Python regression suite
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  fast-quality-gates:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/requirements-lock.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pinned Python dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Reject tracked runtime and sensitive artifacts
+        run: python backend/tools/check_repository_artifacts.py
+
+      - name: Validate migration registry
+        run: python backend/migrations/migrate.py --validate-only
+
+      - name: Compile Python sources
+        run: python -m compileall -q backend
+
+      - name: Run fast Python regression gates
+        run: python backend/tools/run_fast_python_tests.py
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: Get-ChildItem assets/js -Filter *.js | ForEach-Object { node --check $_.FullName }
+
+      - name: Run frontend regression tests
+        shell: pwsh
+        run: Get-ChildItem backend/tests -Filter *.cjs | Sort-Object Name | ForEach-Object { node $_.FullName }
+
+  full-python-regression:
+    if: github.event_name == 'workflow_dispatch' && inputs.full_regression
+    needs: fast-quality-gates
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/requirements-lock.txt
+
+      - name: Install pinned Python dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run complete Python suite
+        run: python -m pytest -q backend/tests

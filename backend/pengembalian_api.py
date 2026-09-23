@@ -288,13 +288,14 @@ def api_send_bpk(request: Request, payload: SendBatchPayload):
         items = [i.dict() for i in payload.items] if payload.items else []
         batch_meta = {'batch_name': payload.batch_name}
         res = pengembalian.send_bpk_batch(items=items, batch_meta=batch_meta, created_by=payload.created_by or 'system')
-        if res.get('status') != 'ok':
+        if res.get('status') == 'error':
             raise Exception(res.get('message') or 'Failed to create BPK batch')
         archive_result = ArchiveService().record_bpk_history(
             res.get('batch_id'), items, payload.created_by or 'system'
         )
-        return {'status': 'ok', 'batch_id': res.get('batch_id'),
-                'inserted': res.get('inserted'), 'archive_bpk': archive_result}
+        return {'status': res.get('status'), 'batch_id': res.get('batch_id'),
+                'inserted': res.get('inserted'), 'failed': res.get('failed', 0),
+                'items': res.get('items', []), 'archive_bpk': archive_result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -306,9 +307,10 @@ def api_send_bank(request: Request, payload: SendBatchPayload):
         items = [i.dict() for i in payload.items] if payload.items else []
         batch_meta = {'batch_name': payload.batch_name}
         res = pengembalian.send_bank_batch(items=items, batch_meta=batch_meta, created_by=payload.created_by or 'system')
-        if res.get('status') != 'ok':
+        if res.get('status') == 'error':
             raise Exception(res.get('message') or 'Failed to create Bank batch')
-        return {'status': 'ok', 'batch_id': res.get('batch_id'), 'inserted': res.get('inserted')}
+        return {'status': res.get('status'), 'batch_id': res.get('batch_id'), 'inserted': res.get('inserted'),
+                'failed': res.get('failed', 0), 'items': res.get('items', [])}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -333,9 +335,10 @@ def api_record_bank_results(request: Request, bank_batch_id: str, payload: BankR
     try:
         rows = [r.dict() for r in payload.results]
         res = pengembalian.record_bank_results(bank_batch_id=bank_batch_id, results=rows, created_by=payload.created_by or 'system')
-        if res.get('status') != 'ok':
+        if res.get('status') == 'error':
             raise Exception(res.get('message') or 'Failed to record bank results')
-        return {'status': 'ok', 'inserted': res.get('inserted'), 'failed': res.get('failed')}
+        return {'status': res.get('status'), 'inserted': res.get('inserted'), 'failed': res.get('failed'),
+                'items': res.get('items', [])}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

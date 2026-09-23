@@ -80,8 +80,10 @@ def create_case_with_conn(conn, nip: str, tahun: int, bulan: int, tipe_kewajiban
     return case_id
 
 
-def insert_history_event(case_id: str, event_type: str, amount: float, created_by: str = 'system', source_table: Optional[str] = None, source_record_id: Optional[str] = None, import_batch_id: Optional[str] = None, notes: Optional[str] = None, currency: Optional[str] = None, source_type: Optional[str] = None, source_file: Optional[str] = None, source_sheet: Optional[str] = None, source_row: Optional[int] = None, source_batch: Optional[str] = None, parent_record_id: Optional[str] = None, calculation_id: Optional[str] = None, calculation_version: Optional[str] = None) -> str:
-    conn = _get_conn()
+def insert_history_event(case_id: str, event_type: str, amount: float, created_by: str = 'system', source_table: Optional[str] = None, source_record_id: Optional[str] = None, import_batch_id: Optional[str] = None, notes: Optional[str] = None, currency: Optional[str] = None, source_type: Optional[str] = None, source_file: Optional[str] = None, source_sheet: Optional[str] = None, source_row: Optional[int] = None, source_batch: Optional[str] = None, parent_record_id: Optional[str] = None, calculation_id: Optional[str] = None, calculation_version: Optional[str] = None, conn=None) -> str:
+    owns_connection = conn is None
+    if owns_connection:
+        conn = _get_conn()
     hid = str(uuid.uuid4())
     now = _now_iso()
     try:
@@ -111,7 +113,8 @@ def insert_history_event(case_id: str, event_type: str, amount: float, created_b
         })
         return hid
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def _record_audit(conn, table_name: str, record_id: Optional[str], action: str, user: str, details: Optional[Dict[str, Any]] = None) -> None:
@@ -533,7 +536,8 @@ def send_bpk_batch(items: List[Dict[str, Any]], batch_meta: Optional[Dict[str, A
             conn.execute(f"INSERT INTO pengembalian_bpk_batch ({cols_sql}) VALUES ({', '.join(['?']*len(vals))})", vals)
         # insert details
         inserted = 0
-        for it in items:
+        failed_items = []
+        for index, it in enumerate(items):
             try:
                 did = str(uuid.uuid4())
                 cols_d = conn.execute("PRAGMA table_info('pengembalian_bpk_detail')").fetchall()
@@ -564,21 +568,24 @@ def send_bpk_batch(items: List[Dict[str, Any]], batch_meta: Optional[Dict[str, A
                     conn.execute(f"INSERT INTO pengembalian_bpk_detail ({cols_sql}) VALUES ({', '.join(['?']*len(vals))})", vals)
                     inserted += 1
             except Exception:
-                # continue inserting other details
+                failed_items.append({'index': index, 'stage': 'detail_insert', 'reason': 'detail_write_failed'})
                 continue
         # audit
         try:
-            _record_audit(conn, table_name='pengembalian_bpk_batch', record_id=batch_id, action='send_bpk_batch', user=created_by, details={'batch_meta': batch_meta, 'inserted': inserted})
+            _record_audit(conn, table_name='pengembalian_bpk_batch', record_id=batch_id, action='send_bpk_batch', user=created_by, details={'batch_meta': batch_meta, 'inserted': inserted, 'failed': len(failed_items)})
         except Exception:
             pass
+        if items and not inserted and failed_items:
+            conn.execute('ROLLBACK')
+            return {'status': 'error', 'batch_id': batch_id, 'inserted': 0, 'failed': len(failed_items), 'items': failed_items, 'message': 'No batch items were saved'}
         conn.execute('COMMIT')
-        return {'status': 'ok', 'batch_id': batch_id, 'inserted': inserted}
+        return {'status': 'partial' if failed_items else 'ok', 'batch_id': batch_id, 'inserted': inserted, 'failed': len(failed_items), 'items': failed_items}
     except Exception as e:
         try:
             conn.execute('ROLLBACK')
         except Exception:
             pass
-        return {'status': 'error', 'message': str(e)}
+        return {'status': 'error', 'message': 'Failed to create BPK batch'}
     finally:
         conn.close()
 
@@ -616,7 +623,8 @@ def send_bank_batch(items: List[Dict[str, Any]], batch_meta: Optional[Dict[str, 
             conn.execute(f"INSERT INTO pengembalian_bank_batch ({cols_sql}) VALUES ({', '.join(['?']*len(vals))})", vals)
         # insert details
         inserted = 0
-        for it in items:
+        failed_items = []
+        for index, it in enumerate(items):
             try:
                 did = str(uuid.uuid4())
                 cols_d = conn.execute("PRAGMA table_info('pengembalian_bank_detail')").fetchall()
@@ -643,20 +651,24 @@ def send_bank_batch(items: List[Dict[str, Any]], batch_meta: Optional[Dict[str, 
                     conn.execute(f"INSERT INTO pengembalian_bank_detail ({cols_sql}) VALUES ({', '.join(['?']*len(vals))})", vals)
                     inserted += 1
             except Exception:
+                failed_items.append({'index': index, 'stage': 'detail_insert', 'reason': 'detail_write_failed'})
                 continue
         # audit
         try:
-            _record_audit(conn, table_name='pengembalian_bank_batch', record_id=batch_id, action='send_bank_batch', user=created_by, details={'batch_meta': batch_meta, 'inserted': inserted})
+            _record_audit(conn, table_name='pengembalian_bank_batch', record_id=batch_id, action='send_bank_batch', user=created_by, details={'batch_meta': batch_meta, 'inserted': inserted, 'failed': len(failed_items)})
         except Exception:
             pass
+        if items and not inserted and failed_items:
+            conn.execute('ROLLBACK')
+            return {'status': 'error', 'batch_id': batch_id, 'inserted': 0, 'failed': len(failed_items), 'items': failed_items, 'message': 'No batch items were saved'}
         conn.execute('COMMIT')
-        return {'status': 'ok', 'batch_id': batch_id, 'inserted': inserted}
+        return {'status': 'partial' if failed_items else 'ok', 'batch_id': batch_id, 'inserted': inserted, 'failed': len(failed_items), 'items': failed_items}
     except Exception as e:
         try:
             conn.execute('ROLLBACK')
         except Exception:
             pass
-        return {'status': 'error', 'message': str(e)}
+        return {'status': 'error', 'message': 'Failed to create Bank batch'}
     finally:
         conn.close()
 
@@ -668,12 +680,12 @@ def record_bank_results(bank_batch_id: str, results: List[Dict[str, Any]], creat
     """
     conn = _get_conn()
     try:
-        conn.execute('BEGIN TRANSACTION')
         inserted = 0
-        failed = 0
+        failed_items = []
         now = _now_iso()
-        for r in results:
+        for index, r in enumerate(results):
             try:
+                conn.execute('BEGIN TRANSACTION')
                 rid = str(uuid.uuid4())
                 cols_r = conn.execute("PRAGMA table_info('pengembalian_bank_result')").fetchall()
                 rnames = [c[1] for c in cols_r] if cols_r else []
@@ -706,27 +718,30 @@ def record_bank_results(bank_batch_id: str, results: List[Dict[str, Any]], creat
                 if st in ('SUCCESS', 'BERHASIL') and r.get('nominal'):
                     try:
                         # amount negative to represent repayment
-                        hid = insert_history_event(case_id=r.get('case_id'), event_type='bank_debit', amount=-abs(float(r.get('nominal'))), created_by=created_by, source_table='pengembalian_bank_result', source_record_id=rid, import_batch_id=bank_batch_id)
+                        insert_history_event(case_id=r.get('case_id'), event_type='bank_debit', amount=-abs(float(r.get('nominal'))), created_by=created_by, source_table='pengembalian_bank_result', source_record_id=rid, import_batch_id=bank_batch_id, conn=conn)
                     except Exception:
-                        # continue even if history insertion fails
-                        pass
+                        raise RuntimeError('history_write_failed')
+                conn.execute('COMMIT')
                 inserted += 1
             except Exception:
-                failed += 1
+                try:
+                    conn.execute('ROLLBACK')
+                except Exception:
+                    pass
+                failed_items.append({'index': index, 'stage': 'history_write' if (r.get('status') or '').upper() in ('SUCCESS', 'BERHASIL') else 'result_write', 'reason': 'result_or_history_write_failed'})
                 continue
         # audit
         try:
-            _record_audit(conn, table_name='pengembalian_bank_result', record_id=bank_batch_id, action='record_bank_results', user=created_by, details={'inserted': inserted, 'failed': failed})
+            _record_audit(conn, table_name='pengembalian_bank_result', record_id=bank_batch_id, action='record_bank_results', user=created_by, details={'inserted': inserted, 'failed': len(failed_items)})
         except Exception:
             pass
-        conn.execute('COMMIT')
-        return {'status': 'ok', 'inserted': inserted, 'failed': failed}
+        return {'status': 'partial' if failed_items and inserted else ('error' if failed_items else 'ok'), 'inserted': inserted, 'failed': len(failed_items), 'items': failed_items}
     except Exception as e:
         try:
             conn.execute('ROLLBACK')
         except Exception:
             pass
-        return {'status': 'error', 'message': str(e)}
+        return {'status': 'error', 'message': 'Failed to record bank results'}
     finally:
         conn.close()
 

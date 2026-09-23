@@ -144,6 +144,12 @@
     return Number.isFinite(n) ? Math.round(n) : 0;
   }
 
+  function safeNumericInputValue(value) {
+    if (value === null || value === undefined || value === '') return '';
+    const number = Number(value);
+    return Number.isFinite(number) ? String(number) : '';
+  }
+
   function nextPaymentPeriod(period) {
     const [year, month] = String(period || '').split('-').map(Number);
     if (!year || !month) return '';
@@ -260,14 +266,14 @@
     }
     if (!S.final.length) mod.process();
     el.innerHTML = `
-      <div class="module-head"><div><h2>⑥ Final</h2><p class="muted">Rekap bulanan per SDM — ${U.monthLabel(S.month)}. Kehadiran = 30%, Kinerja/SKP = 70%.</p></div></div>
+      <div class="module-head"><div><h2>⑥ Final</h2><p class="muted">Rekap bulanan per SDM — <span id="finalMonthLabel"></span>. Kehadiran = 30%, Kinerja/SKP = 70%.</p></div></div>
       <div class="config-tabs">
         <button class="ctab ${tab === 'absensi' ? 'active' : ''}" data-t="absensi">Final Absensi</button>
         <button class="ctab ${tab === 'skp' ? 'active' : ''}" data-t="skp">Final + SKP (opsional)</button>
         <button class="ctab ${tab === 'kombinasi' ? 'active' : ''}" data-t="kombinasi">Final Kombinasi (opsional)</button>
         <button class="ctab ${tab === 'combined' ? 'active' : ''}" data-t="combined">FINAL + SKP Kombinasi</button>
       </div>
-      <div class="filter-bar"><label>Periode Final <select id="finalMonth">${[...new Set(S.rekap.map(r => r.bulan || S.month))].sort().map(m => `<option value="${m}" ${m === S.month ? 'selected' : ''}>${U.monthLabel(m)}</option>`).join('')}</select></label><input type="search" id="finalNipSearch" placeholder="Cari NIP..." value="${U.esc(nipSearch)}" data-testid="final-nip-search" /></div>
+      <div class="filter-bar"><label>Periode Final <select id="finalMonth"></select></label><input type="search" id="finalNipSearch" placeholder="Cari NIP..." data-testid="final-nip-search" /></div>
       <div id="finalBody">${tab === 'absensi' ? absensiView() : tab === 'skp' ? skpView() : tab === 'kombinasi' ? kombinasiView() : combinedView()}</div>
       <div class="actions-row">
         <button class="btn btn-ghost" onclick="EVKIN.go('semifinal')"><i data-lucide="arrow-left"></i> Kembali</button>
@@ -275,8 +281,19 @@
         <button class="btn btn-primary" id="exportPairedFinal">Lanjut: Export Excel <i data-lucide="arrow-right"></i></button>
       </div><div id="finalExportStatus" role="status" aria-live="polite"></div>`;
     el.querySelectorAll('.ctab').forEach(b => b.onclick = () => { tab = b.dataset.t; EVKIN.go('final'); });
-    el.querySelector('#finalMonth').onchange = e => {S.month=e.target.value; EVKIN.invalidateFrom('rekap',{save:false}); EVKIN.go('final');};
-    el.querySelector('#finalNipSearch').oninput = (e) => { nipSearch = e.target.value.trim().toLowerCase(); S.finalPage = 0; EVKIN.go('final'); };
+    el.querySelector('#finalMonthLabel').textContent = U.monthLabel(S.month);
+    const finalMonth = el.querySelector('#finalMonth');
+    [...new Set(S.rekap.map(r => r.bulan || S.month))].sort().forEach(month => {
+      const option = document.createElement('option');
+      option.value = String(month ?? '');
+      option.textContent = U.monthLabel(month);
+      option.selected = month === S.month;
+      finalMonth.appendChild(option);
+    });
+    finalMonth.onchange = e => {S.month=e.target.value; EVKIN.invalidateFrom('rekap',{save:false}); EVKIN.go('final');};
+    const finalNipSearch = el.querySelector('#finalNipSearch');
+    finalNipSearch.value = nipSearch;
+    finalNipSearch.oninput = (e) => { nipSearch = e.target.value.trim().toLowerCase(); S.finalPage = 0; EVKIN.go('final'); };
     const exportButton = el.querySelector('#exportPairedFinal');
     exportButton.onclick = async () => {
       if (exportButton.disabled) return;
@@ -342,9 +359,9 @@
     const endIdx = startIdx + ITEMS_PER_PAGE;
     const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map(f => `<tr>
+    const rows = pageData.map((f, rowIndex) => `<tr>
       <td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td><td>${U.esc(f.jabatan)}</td>
-      <td><input type="number" class="cell-num" data-tukin="${f.nip}" value="${f.tukin}" data-testid="final-tukin-${U.esc(f.nip)}"/></td>
+      <td><input type="number" class="cell-num" data-final-tukin-row="${startIdx + rowIndex}" data-testid="final-tukin-input"/></td>
       <td>${f.komponen == null ? '<span class="pill red">Belum tersedia</span>' : U.fmtRupiah(f.komponen)}</td><td><b>${f.potPct}%</b></td><td>${f.nominal == null ? '<span class="pill red">Belum tersedia</span>' : U.fmtRupiah(f.nominal)}</td>
       <td class="pay"><b>${f.finalDibayar == null ? '<span class="pill red">' + U.esc(f.masterSdmStatus || 'TUKIN BRUTO BELUM TERSEDIA') + '</span>' : U.fmtRupiah(f.finalDibayar)}</b></td></tr>`).join('');
     const totBruto = data.reduce((a, f) => a + (Number(f.tukin) || 0), 0);
@@ -376,9 +393,16 @@
       <p class="muted">Edit Tukin Bruto pada tabel untuk memperbarui perhitungan. Nominal = Komponen 30% × Total Potongan %.</p></div>`;
   }
   function bindAbsensi(el) {
-    el.querySelectorAll('[data-tukin]').forEach(inp => inp.onchange = () => {
-      const f = S.final.find(x => x.nip === inp.dataset.tukin);
-      f.tukin = parseFloat(inp.value) || 0; recalc(f); EVKIN.save(); EVKIN.go('final');
+    el.querySelectorAll('[data-final-tukin-row]').forEach(inp => {
+      const f = filteredFinal()[Number(inp.dataset.finalTukinRow)];
+      if (!f) return;
+      inp.dataset.tukin = String(f.nip ?? '');
+      inp.value = safeNumericInputValue(f.tukin);
+      inp.onchange = () => {
+        const current = S.final.find(x => x.nip === inp.dataset.tukin);
+        if (!current) return;
+        current.tukin = parseFloat(inp.value) || 0; recalc(current); EVKIN.save(); EVKIN.go('final');
+      };
     });
 
     const ITEMS_PER_PAGE = 10;
@@ -402,14 +426,14 @@
     const endIdx = startIdx + ITEMS_PER_PAGE;
     const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map(f => {
+    const rows = pageData.map((f, rowIndex) => {
       const sr = skpRow(f.nip);
       const komKinerja = roundMoney(f.tukin * KINERJA);
       const nomSKP = roundMoney(komKinerja * (Math.min(100, sr.skpPct) / 100));
       const finalTotal = roundMoney(f.tukin - f.nominal - nomSKP);
       return `<tr><td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td><td>${U.fmtRupiah(f.tukin)}</td>
         <td>${U.fmtRupiah(f.nominal)}</td>
-        <td><input type="number" step="0.1" class="cell-num" data-skp="${f.nip}" value="${sr.skpPct}" ${S.finalSKP.enabled ? '' : 'disabled'} data-testid="skp-pct-${U.esc(f.nip)}"/></td>
+        <td><input type="number" step="0.1" class="cell-num" data-final-skp-row="${startIdx + rowIndex}" ${S.finalSKP.enabled ? '' : 'disabled'} data-testid="skp-pct-input"/></td>
         <td>${U.fmtRupiah(nomSKP)}</td><td class="pay"><b>${U.fmtRupiah(finalTotal)}</b></td></tr>`;
     }).join('');
 
@@ -449,8 +473,15 @@
     const cb = el.querySelector('#skpEnabled');
     if (cb) cb.onchange = () => { S.finalSKP.enabled = cb.checked; EVKIN.save(); EVKIN.go('final'); };
 
-    el.querySelectorAll('[data-skp]').forEach(inp => inp.onchange = () => {
-      skpRow(inp.dataset.skp).skpPct = parseFloat(inp.value) || 0; EVKIN.save(); EVKIN.go('final');
+    el.querySelectorAll('[data-final-skp-row]').forEach(inp => {
+      const f = filteredFinal()[Number(inp.dataset.finalSkpRow)];
+      if (!f) return;
+      const row = skpRow(f.nip);
+      inp.dataset.skp = String(f.nip ?? '');
+      inp.value = safeNumericInputValue(row.skpPct);
+      inp.onchange = () => {
+        skpRow(inp.dataset.skp).skpPct = parseFloat(inp.value) || 0; EVKIN.save(); EVKIN.go('final');
+      };
     });
 
     // File import SKP
@@ -504,7 +535,7 @@
     const endIdx = startIdx + ITEMS_PER_PAGE;
     const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map(f => {
+    const rows = pageData.map((f, rowIndex) => {
       const kr = kombRow(f.nip);
       const cand = [];
       if (K.useApp) cand.push(f.potPct);
@@ -514,8 +545,8 @@
       const nominal = roundMoney(f.komponen * (Math.min(100, minPct) / 100));
       const finalPay = roundMoney(f.tukin - nominal);
       return `<tr><td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td><td>${f.potPct}%</td>
-        <td><input type="number" step="0.1" class="cell-num" data-kf="eabs" data-nip="${f.nip}" value="${kr.eabs}" ${K.useEabsensi ? '' : 'disabled'}/></td>
-        <td><input type="number" step="0.1" class="cell-num" data-kf="esdm" data-nip="${f.nip}" value="${kr.esdm}" ${K.useEsdm ? '' : 'disabled'}/></td>
+        <td><input type="number" step="0.1" class="cell-num" data-kf="eabs" data-final-komb-row="${startIdx + rowIndex}" ${K.useEabsensi ? '' : 'disabled'}/></td>
+        <td><input type="number" step="0.1" class="cell-num" data-kf="esdm" data-final-komb-row="${startIdx + rowIndex}" ${K.useEsdm ? '' : 'disabled'}/></td>
         <td><b>${minPct}%</b></td><td>${U.fmtRupiah(nominal)}</td><td class="pay"><b>${U.fmtRupiah(finalPay)}</b></td></tr>`;
     }).join('');
 
@@ -572,8 +603,15 @@
     const b = (id, key) => { const c = el.querySelector(id); if (c) c.onchange = () => { K[key] = c.checked; EVKIN.save(); EVKIN.go('final'); }; };
     b('#kApp', 'useApp'); b('#kEabs', 'useEabsensi'); b('#kEsdm', 'useEsdm');
 
-    el.querySelectorAll('[data-kf]').forEach(inp => inp.onchange = () => {
-      kombRow(inp.dataset.nip)[inp.dataset.kf] = parseFloat(inp.value) || 0; EVKIN.save(); EVKIN.go('final');
+    el.querySelectorAll('[data-kf]').forEach(inp => {
+      const f = filteredFinal()[Number(inp.dataset.finalKombRow)];
+      if (!f) return;
+      const row = kombRow(f.nip);
+      inp.dataset.nip = String(f.nip ?? '');
+      inp.value = safeNumericInputValue(row[inp.dataset.kf]);
+      inp.onchange = () => {
+        kombRow(inp.dataset.nip)[inp.dataset.kf] = parseFloat(inp.value) || 0; EVKIN.save(); EVKIN.go('final');
+      };
     });
 
     // File import Kombinasi (e-Absensi & e-SDM)

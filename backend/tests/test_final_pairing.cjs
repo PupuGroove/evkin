@@ -12,11 +12,14 @@ async function main() {
     stepUnlocked: () => true, exportBackend: {enabled: true, apiBase: 'http://localhost:8000'}, toast() {}};
   const elements = new Map();
   const el = {innerHTML: '', querySelectorAll: () => [], querySelector: key => {
-    if (!elements.has(key)) elements.set(key, {});
+    if (!elements.has(key)) elements.set(key, {children: [], appendChild(child) { this.children.push(child); }});
     return elements.get(key);
   }};
   vm.runInNewContext(fs.readFileSync('assets/js/final.js', 'utf8'), {
-    window: {EVKIN: E}, document: {body: {dataset: {page: 'final'}}}, URL, AbortSignal, console,
+    window: {EVKIN: E}, document: {
+      body: {dataset: {page: 'final'}},
+      createElement: tagName => ({tagName: tagName.toUpperCase(), textContent: '', value: '', selected: false})
+    }, URL, AbortSignal, console,
     fetch: async (url, options) => {
       calls++;
       assert.ok(String(url).endsWith('/api/shared-master/lookup-tukin'));

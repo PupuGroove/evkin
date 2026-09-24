@@ -1260,7 +1260,7 @@ def archive_progress_template(request: Request):
     _require_pengembalian_api_key(request)
     content = _progress_service().template_xlsx()
     return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="TEMPLATE_IMPORT_PROGRESS_PENGEMBALIAN.xlsx"'})
+        headers={"Content-Disposition": 'attachment; filename="Template_Import_Progress_Pengembalian.xlsx"'})
 
 
 @router.get("/archive/progress/download")

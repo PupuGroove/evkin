@@ -63,6 +63,10 @@ def _number(value):
         return None
     if "," in text and "." in text:
         text = text.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", text):
+        # Canonical progress template accepts Indonesian thousand separators:
+        # 500.000 means Rp500000, not a decimal 500.0.
+        text = text.replace(".", "")
     elif "," in text:
         text = text.replace(",", ".")
     return float(text)
@@ -508,13 +512,13 @@ class ProgressService:
         stage = _stage_number(stage_raw)
         tukin_raw, um_raw = get("debit tukin", "nominal debit tukin"), get("debit uang makan", "nominal debit uang makan")
         total_raw = get("nominal debit total", "nominal debit", "nominal debet", "jumlah debit")
-        proposed_raw = get("nominal diajukan", "nominal_diajukan")
+        proposed_raw = get("nominal", "nominal diajukan", "nominal_diajukan")
         successful_raw = get("nominal berhasil", "nominal_berhasil")
         tukin, um = _number(tukin_raw), _number(um_raw)
         status = (_clean(get("status debit", "status")) or "").upper().replace(" ", "_")
         if status == "SUKSES": status = "BERHASIL"
-        original_bank = _clean(get("nama bank", "bank") or metadata.get("nama_bank"))
-        tanggal = _date(get("tanggal proses", "tanggal debit"))
+        original_bank = _clean(get("bank transaksi", "nama bank", "bank") or metadata.get("nama_bank"))
+        tanggal = _date(get("tanggal transaksi", "tanggal proses", "tanggal debit"))
         period = _clean(get("periode debit") or metadata.get("periode_debit"))
         if stage is None and period:
             stage_match = re.search(r"TAHAP\s*([IVXLCDM]+|\d+)", period.upper())
@@ -569,8 +573,14 @@ class ProgressService:
                   "original_transaction_id": _clean(get("original transaction id", "transaksi asal")),
                   "correction_type": _clean(get("correction type", "jenis koreksi")),
                   "errors": errors, "warnings": warnings, "flags": flags, "raw_data": dict(source)}
+        # Status and the source transaction are part of the ledger identity.  In
+        # particular, a REVERSAL may legitimately carry the same stage, bank,
+        # NTPN, nominal, and date as its successful source transaction.
+        legacy_fingerprint_parts = [master_period, nip, year, component, stage, result["nama_bank_normalized"],
+                                    result["ntpn"], successful, tanggal]
+        result["legacy_fingerprint"] = sha256("|".join(str(x or "") for x in legacy_fingerprint_parts).encode()).hexdigest()
         fingerprint_parts = [master_period, nip, year, component, stage, result["nama_bank_normalized"],
-                             result["ntpn"], successful, tanggal]
+                             status, result["original_transaction_id"], result["ntpn"], successful, tanggal]
         result["fingerprint"] = sha256("|".join(str(x or "") for x in fingerprint_parts).encode()).hexdigest()
         return result
 
@@ -611,8 +621,20 @@ class ProgressService:
                 JOIN pengembalian_progress_import_batch b ON b.import_batch_id=t.import_batch_id
                 WHERE coalesce(t.is_active,true) AND b.status IN ('COMMITTED','PARTIAL')
                 GROUP BY t.obligation_id""").fetchall()}
-            existing = {r[0]: r[1:] for r in conn.execute(
-                "SELECT fingerprint,transaction_id,import_batch_id,created_at FROM pengembalian_progress_transaction WHERE coalesce(is_active,true)").fetchall()}
+            existing = {}
+            legacy_fingerprints = set()
+            existing_rows = conn.execute("""SELECT fingerprint,transaction_id,import_batch_id,created_at,
+                periode_id,nip,tahun_sp2d,komponen_debit,tahap,nama_bank_normalized,ntpn,
+                nominal_berhasil,tanggal_debit,status_debit,original_transaction_id
+                FROM pengembalian_progress_transaction WHERE coalesce(is_active,true)""").fetchall()
+            for record in existing_rows:
+                fingerprint = record[0]
+                existing[fingerprint] = record[1:4]
+                modern_parts = [record[4], record[5], record[6], record[7], record[8], record[9],
+                                record[13], record[14], record[10], float(record[11] or 0), record[12]]
+                modern_fingerprint = sha256("|".join(str(value or "") for value in modern_parts).encode()).hexdigest()
+                if fingerprint != modern_fingerprint:
+                    legacy_fingerprints.add(fingerprint)
             original_transactions = {r[0]: {"obligation_id": r[1], "nip": r[2], "tahun_sp2d": r[3],
                 "tukin": float(r[4] or 0), "um": float(r[5] or 0), "status": r[6]} for r in conn.execute(
                 """SELECT transaction_id,obligation_id,nip,tahun_sp2d,nominal_debit_tukin,
@@ -676,9 +698,11 @@ class ProgressService:
                     prior_tukin, prior_um = reversed_totals.get(original_id, (0, 0))
                     if prior_tukin + row["nominal_debit_tukin"] > original["tukin"] or prior_um + row["nominal_debit_uang_makan"] > original["um"]:
                         row["errors"].append("REVERSAL_EXCEEDS_ORIGINAL")
-            if row["fingerprint"] in existing or row["fingerprint"] in seen:
+            if (row["fingerprint"] in existing or row["legacy_fingerprint"] in legacy_fingerprints
+                    or row["fingerprint"] in seen):
                 row["errors"].append("DUPLICATE_TRANSACTION")
-                row["existing_transaction"] = existing.get(row["fingerprint"])
+                row["existing_transaction"] = (existing.get(row["fingerprint"])
+                                               or existing.get(row["legacy_fingerprint"]))
             seen.add(row["fingerprint"])
             if row.get("obligation_id") and not row["errors"]:
                 obligation=next(item for item in obligations[key] if item["obligation_id"] == row["obligation_id"]);actual_tukin,actual_um=paid.get(row["obligation_id"],(0,0))
@@ -704,7 +728,8 @@ class ProgressService:
                  "nip_ditemukan": count(lambda r:r.get("obligation_id")), "nip_tidak_ditemukan": count(lambda r:"NIP_NOT_FOUND" in r["errors"]),
                   "tahun_sp2d_cocok": count(lambda r:r.get("obligation_id")), "tahun_sp2d_tidak_cocok": count(lambda r:"SP2D_NOT_FOUND" in r["errors"]),
                   "ambiguous_obligation": count(lambda r:"AMBIGUOUS_OBLIGATION" in r["errors"]),
-                 "berhasil": count(lambda r:r["status_debit"]=="BERHASIL"), "gagal": count(lambda r:r["status_debit"]=="GAGAL"),
+                  "berhasil": count(lambda r:r["status_debit"]=="BERHASIL"), "gagal": count(lambda r:r["status_debit"]=="GAGAL"),
+                  "pending": count(lambda r:r["status_debit"]=="PENDING"), "reversal": count(lambda r:r["status_debit"]=="REVERSAL"),
                  "tukin": count(lambda r:r["komponen_debit"]=="TUKIN"), "uang_makan": count(lambda r:r["komponen_debit"]=="UANG_MAKAN"),
                  "gabungan": count(lambda r:r["komponen_debit"]=="TUKIN_DAN_UANG_MAKAN"),
                  "duplicate": count(lambda r:"DUPLICATE_TRANSACTION" in r["errors"]),
@@ -716,8 +741,10 @@ class ProgressService:
                  "total_uang_makan": sum(r["nominal_debit_uang_makan"] for r in normalized),
                  "total_diajukan": sum(r["nominal_diajukan"] for r in normalized),
                  "total_debit": sum(r["nominal_diajukan"] for r in normalized),
-                 "debit_berhasil":sum(r["nominal_berhasil"] for r in normalized if r["status_debit"]=="BERHASIL"),
-                 "debit_gagal":sum(r["nominal_diajukan"] for r in normalized if r["status_debit"]=="GAGAL")}
+                  "debit_berhasil":sum(r["nominal_berhasil"] for r in normalized if r["status_debit"]=="BERHASIL"),
+                  "debit_gagal":sum(r["nominal_diajukan"] for r in normalized if r["status_debit"]=="GAGAL"),
+                  "debit_pending":sum(r["nominal_diajukan"] for r in normalized if r["status_debit"]=="PENDING"),
+                  "debit_reversal":sum(r["nominal_berhasil"] for r in normalized if r["status_debit"]=="REVERSAL")}
         preview_filters={"periode_id":metadata["periode_id"]} if metadata.get("periode_id") else None
         before=self.progress(preview_filters,limit=1)["summary"]
         successful=sum(r["nominal_berhasil"] for r in normalized if r["status_debit"]=="BERHASIL" and not r["errors"])
@@ -1399,8 +1426,20 @@ class ProgressService:
         finally: conn.close()
 
     def template_xlsx(self):
-        columns=["NIP","Nama","Provinsi","Kab/Kota","Bank","Nomor Rekening","Tahun SP2D","Komponen","Tahap","Nominal Diajukan","Nominal Berhasil","Status","NTPN","Tanggal Proses","Alasan Gagal","Keterangan"]
-        guide=[["Kolom","Petunjuk"],["NIP","Wajib; format TEXT dan harus cocok dengan Final Pengembalian."],["Tahun SP2D","Wajib; 4 digit dan harus cocok dengan Final Pengembalian."],["Komponen","TUKIN atau UANG_MAKAN."],["Tahap","Bilangan bulat bebas lebih dari 0; tidak dibatasi jumlah tahap."],["Nominal Diajukan","Angka non-negatif."],["Nominal Berhasil","Hanya dihitung bila Status BERHASIL."],["Status","BERHASIL, GAGAL, atau PENDING."],["NTPN","Melekat pada transaksi; satu tahap boleh memiliki beberapa baris/NTPN."],["Tanggal Proses","Gunakan tanggal Excel atau DD/MM/YYYY."],["Import","Setiap baris menambah ledger; tidak menimpa bank atau tahap sebelumnya."]]
+        columns=["NIP","TAHUN_SP2D","TAHAP","BANK_TRANSAKSI","KOMPONEN","NOMINAL","STATUS","NTPN","TANGGAL_TRANSAKSI","KETERANGAN","ORIGINAL_TRANSACTION_ID"]
+        guide=[["Kolom","Petunjuk"],
+               ["NIP","Wajib; formatkan sebagai TEXT agar leading zero tidak berubah atau menjadi scientific notation."],
+               ["TAHUN_SP2D","Wajib; integer 4 digit, dicocokkan bersama NIP ke kewajiban."],
+               ["TAHAP","Wajib; bilangan bulat >= 1, mendukung Tahap N tanpa batas maksimum."],
+               ["BANK_TRANSAKSI","Wajib; disimpan terpisah dari Bank Payroll. Gunakan uppercase, contoh MANDIRI/BRI/BSI; bank lain tetap diterima."],
+               ["KOMPONEN","Wajib; TUKIN atau UANG_MAKAN."],
+               ["NOMINAL","Wajib; angka non-negatif. Format Indonesia seperti 1.000.000,00 diterima."],
+               ["STATUS","Wajib; BERHASIL, GAGAL, PENDING, atau REVERSAL."],
+               ["NTPN","Opsional; simpan sebagai TEXT."],
+               ["TANGGAL_TRANSAKSI","Opsional; gunakan YYYY-MM-DD (DD/MM/YYYY juga diterima dan dinormalisasi)."],
+               ["KETERANGAN","Opsional; catatan sumber transaksi."],
+               ["ORIGINAL_TRANSACTION_ID","Opsional kecuali REVERSAL; wajib menunjuk transaksi BERHASIL asal agar koreksi audit-able."],
+               ["Import","Setiap baris menambah ledger, tidak menimpa tahap/bank terdahulu, dan file yang sama tidak dapat diposting ulang."]]
         output=BytesIO()
         with pd.ExcelWriter(output,engine="openpyxl") as writer:
             pd.DataFrame(columns=columns).to_excel(writer,sheet_name="IMPORT_PROGRESS",index=False)
@@ -1408,15 +1447,22 @@ class ProgressService:
             for ws in writer.book.worksheets:
                 ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
                 for col in ws.columns: ws.column_dimensions[col[0].column_letter].width=min(max(len(str(c.value or "")) for c in col)+2,50)
-            writer.book["IMPORT_PROGRESS"].column_dimensions["A"].width=22
-            from openpyxl.worksheet.datavalidation import DataValidation
             ws=writer.book["IMPORT_PROGRESS"]
+            ws.column_dimensions["A"].width=22
+            for column in ("A", "H", "K"):
+                ws[f"{column}2"].number_format="@"
+            ws["I2"].number_format="yyyy-mm-dd"
+            from openpyxl.worksheet.datavalidation import DataValidation
             component_validation=DataValidation(type="list",formula1='"TUKIN,UANG_MAKAN"',allow_blank=False)
-            status_validation=DataValidation(type="list",formula1='"BERHASIL,GAGAL,PENDING"',allow_blank=False)
+            status_validation=DataValidation(type="list",formula1='"BERHASIL,GAGAL,PENDING,REVERSAL"',allow_blank=False)
             stage_validation=DataValidation(type="whole",operator="greaterThan",formula1="0",allow_blank=False)
-            ws.add_data_validation(component_validation);component_validation.add("H2:H1048576")
-            ws.add_data_validation(stage_validation);stage_validation.add("I2:I1048576")
-            ws.add_data_validation(status_validation);status_validation.add("L2:L1048576")
+            year_validation=DataValidation(type="whole",operator="between",formula1="1900",formula2="2200",allow_blank=False)
+            nominal_validation=DataValidation(type="decimal",operator="greaterThanOrEqual",formula1="0",allow_blank=False)
+            ws.add_data_validation(component_validation);component_validation.add("E2:E1048576")
+            ws.add_data_validation(stage_validation);stage_validation.add("C2:C1048576")
+            ws.add_data_validation(status_validation);status_validation.add("G2:G1048576")
+            ws.add_data_validation(year_validation);year_validation.add("B2:B1048576")
+            ws.add_data_validation(nominal_validation);nominal_validation.add("F2:F1048576")
         return output.getvalue()
 
     def export_xlsx(self, filters=None, official=False):

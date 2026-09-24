@@ -188,6 +188,36 @@ def test_reversal_recomputes_component_remaining_without_cross_offset(tmp_path):
     assert item["total_sisa_piutang"] == 600_000
 
 
+def test_reversal_with_same_ledger_attributes_as_source_is_not_duplicate(tmp_path):
+    svc = service(tmp_path)
+    paid = row(tukin=500_000, period="Tahap 1", date="18/07/2026")
+    paid.update({"Tahap": 1, "NTPN": "NTPN-SAME"})
+    first = svc.preview([paid], {"file_hash": "same-source", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert svc.commit_batch(first["import_batch_id"])["inserted"] == 1
+    original_id = svc.history({"import_batch_id": first["import_batch_id"]})["rows"][0]["transaction_id"]
+
+    reversal = row(tukin=500_000, status="REVERSAL", period="Tahap 1", date="18/07/2026")
+    reversal.update({"Tahap": 1, "NTPN": "NTPN-SAME", "Original Transaction ID": original_id})
+    second = svc.preview([reversal], {"file_hash": "same-reversal", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert second["rows"][0]["classification"] != "DUPLICATE"
+    assert svc.commit_batch(second["import_batch_id"])["inserted"] == 1
+    assert find(svc.progress(limit=20), "A", 2025)["sudah_debit_tukin"] == 0
+
+
+def test_new_fingerprint_keeps_legacy_transaction_deduplication(tmp_path):
+    svc = service(tmp_path)
+    source = row(tukin=500_000, period="Tahap 1", date="18/07/2026")
+    source.update({"Tahap": 1, "NTPN": "NTPN-LEGACY"})
+    first = svc.preview([source], {"file_hash": "legacy-source", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert svc.commit_batch(first["import_batch_id"])["inserted"] == 1
+    conn = duckdb.connect(svc.db_path)
+    conn.execute("UPDATE pengembalian_progress_transaction SET fingerprint=?", [first["rows"][0]["legacy_fingerprint"]])
+    conn.close()
+
+    copied = svc.preview([source], {"file_hash": "legacy-copy", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert copied["rows"][0]["classification"] == "DUPLICATE"
+
+
 def test_pagination_summary_and_export(tmp_path):
     svc=service(tmp_path)
     result=svc.progress(limit=1,offset=0)
@@ -241,6 +271,57 @@ def test_template_has_import_and_guide(tmp_path):
     svc=service(tmp_path)
     workbook=pd.ExcelFile(BytesIO(svc.template_xlsx()))
     assert workbook.sheet_names == ["IMPORT_PROGRESS","PETUNJUK"]
+    assert list(pd.read_excel(BytesIO(svc.template_xlsx()), sheet_name="IMPORT_PROGRESS").columns) == [
+        "NIP", "TAHUN_SP2D", "TAHAP", "BANK_TRANSAKSI", "KOMPONEN", "NOMINAL",
+        "STATUS", "NTPN", "TANGGAL_TRANSAKSI", "KETERANGAN", "ORIGINAL_TRANSACTION_ID",
+    ]
+    from openpyxl import load_workbook
+    generated = load_workbook(BytesIO(svc.template_xlsx()))["IMPORT_PROGRESS"]
+    rules = {rule.formula1 for rule in generated.data_validations.dataValidation}
+    assert '"TUKIN,UANG_MAKAN"' in rules
+    assert '"BERHASIL,GAGAL,PENDING,REVERSAL"' in rules
+    assert generated["A2"].number_format == "@"
+
+
+def test_canonical_template_rows_import_all_statuses_banks_stages_and_years(tmp_path):
+    svc = service(tmp_path)
+    canonical_rows = [
+        {"NIP": "A", "TAHUN_SP2D": 2025, "TAHAP": 1, "BANK_TRANSAKSI": "mandiri",
+         "KOMPONEN": "TUKIN", "NOMINAL": "500.000", "STATUS": "BERHASIL", "NTPN": "N-A",
+         "TANGGAL_TRANSAKSI": "2026-07-18", "KETERANGAN": "Tahap pertama"},
+        {"NIP": "B", "TAHUN_SP2D": 2025, "TAHAP": 1, "BANK_TRANSAKSI": "BRI",
+         "KOMPONEN": "TUKIN", "NOMINAL": "100.000", "STATUS": "GAGAL", "NTPN": "",
+         "TANGGAL_TRANSAKSI": "18/07/2026", "KETERANGAN": "Saldo kurang"},
+        {"NIP": "B", "TAHUN_SP2D": 2026, "TAHAP": 10, "BANK_TRANSAKSI": "BSI",
+         "KOMPONEN": "TUKIN", "NOMINAL": "200.000", "STATUS": "PENDING", "NTPN": "",
+         "TANGGAL_TRANSAKSI": "2026-07-19", "KETERANGAN": "Menunggu proses"},
+    ]
+    first = svc.preview(canonical_rows, {"file_hash": "canonical-template", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert first["statistics"]["valid"] == 3
+    assert {key: first["statistics"][key] for key in ("berhasil", "gagal", "pending", "reversal")} == {
+        "berhasil": 1, "gagal": 1, "pending": 1, "reversal": 0,
+    }
+    assert first["statistics"]["tahap"] == [1, 10]
+    assert first["statistics"]["tahun_sp2d"] == [2025, 2026]
+    assert first["statistics"]["bank"] == ["BRI", "BSI", "MANDIRI"]
+    assert svc.commit_batch(first["import_batch_id"])["inserted"] == 3
+    history = svc.history({}, limit=10)["rows"]
+    assert {(item["nama_bank_normalized"], item["tahap"], item["status_debit"]) for item in history} == {
+        ("MANDIRI", 1, "BERHASIL"), ("BRI", 1, "GAGAL"), ("BSI", 10, "PENDING"),
+    }
+
+    original = next(item["transaction_id"] for item in history if item["status_debit"] == "BERHASIL")
+    reversal = [{"NIP": "A", "TAHUN_SP2D": 2025, "TAHAP": 1, "BANK_TRANSAKSI": "MANDIRI",
+                 "KOMPONEN": "TUKIN", "NOMINAL": 500_000, "STATUS": "REVERSAL", "NTPN": "N-A",
+                 "TANGGAL_TRANSAKSI": "2026-07-18", "KETERANGAN": "Koreksi",
+                 "ORIGINAL_TRANSACTION_ID": original}]
+    reversed_batch = svc.preview(reversal, {"file_hash": "canonical-reversal", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert reversed_batch["statistics"]["valid"] == 1
+    assert svc.commit_batch(reversed_batch["import_batch_id"])["inserted"] == 1
+    assert find(svc.progress(limit=20), "A", 2025)["sudah_debit_tukin"] == 0
+
+    replay = svc.preview(canonical_rows, {"file_hash": "canonical-template", "import_mode": "PROGRESS_STAGE_IMPORT"})
+    assert replay["file_duplicate"]["warning"] == "FILE_ALREADY_IMPORTED"
 
 
 def test_preview_uses_staging_without_final_transaction(tmp_path):
@@ -364,6 +445,19 @@ def test_unlimited_stage_ntpn_and_bank_history(tmp_path):
     obligation=conn.execute("SELECT komponen,nominal_kewajiban FROM pengembalian_obligation_component WHERE nip='A' ORDER BY komponen").fetchall()
     conn.close()
     assert obligation == [("TUKIN",1_000_000),("UANG_MAKAN",0)]
+
+
+def test_stage_sorting_is_numeric_beyond_stage_nine(tmp_path):
+    svc = service(tmp_path)
+    rows = []
+    for stage, ntpn, amount in [(10, "NTPN-10", 100_000), (2, "NTPN-2", 200_000)]:
+        rows.append({"NIP": "A", "Nama": "SDM A", "Bank": "BRI", "Tahun SP2D": 2025,
+                     "Komponen": "TUKIN", "Tahap": stage, "Nominal Diajukan": amount,
+                     "Nominal Berhasil": amount, "Status": "BERHASIL", "NTPN": ntpn,
+                     "Tanggal Proses": f"{stage:02d}/10/2026"})
+    assert svc.import_rows(rows, {"file_hash": "numeric-stage-sort"})["inserted"] == 2
+    assert svc.wide_progress(limit=10)["stages"] == [2, 10]
+    assert [item["tahap"] for item in svc.recaps()["tahap_sp2d"]["rows"]] == [2, 10]
 
 
 def test_baseline_parser_uses_only_authoritative_sheets_and_pengembalian_columns(tmp_path):

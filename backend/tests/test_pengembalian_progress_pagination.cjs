@@ -35,5 +35,7 @@ assert.equal(progressPage, 0);
 
 assert.match(source, /const loadProgress = async page => \{progressPage=normalizeProgressPage\(page\);/);
 assert.match(source, /p\.set\('offset',progressPage\*progressSize\)/);
+assert.match(source, /aria-label="Bank Payroll"/);
+assert.match(source, /<th>Bank Transaksi<\/th>/);
 
 console.log('Return progress pagination stays synchronized across navigation and filter resets: PASS');

@@ -48,3 +48,26 @@ def test_export_database_error_does_not_create_successful_empty_sheet(monkeypatc
     with pytest.raises(HTTPException):
         api.run_export_job('failed', '2026-09', None, ['FINAL ABSENSI'])
     assert not (tmp_path / 'failed.xlsx').exists()
+
+
+def test_export_query_is_explicit_and_rejects_invalid_sources():
+    query, params = api.build_export_query(
+        'final_absensi', '2026-08', {'nip', 'bulan', 'unit'}, 'SDM', None
+    )
+    assert query == 'SELECT * FROM "final_absensi" WHERE "bulan" = ? AND "unit" = ?'
+    assert params == ['2026-08', 'SDM']
+    with pytest.raises(api.ExportValidationError, match='Unsupported export source'):
+        api.build_export_query('final_tukin', '2026-08', {'nip'})
+    with pytest.raises(api.ExportValidationError, match='Periode export tidak valid'):
+        api.build_export_query('final_absensi', '', {'nip'})
+
+
+def test_export_missing_source_returns_business_error_not_unbound_local(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, 'DUCKDB_PATH', str(tmp_path / 'missing.duckdb'))
+    with pytest.raises(HTTPException) as error:
+        api.read_workflow_table_duckdb('final_absensi', '2026-08')
+    assert error.value.status_code == 404
+    detail = error.value.detail
+    assert isinstance(detail, dict)
+    assert detail['code'] == 'EXPORT_SOURCE_NOT_FOUND'
+    assert 'UnboundLocalError' not in str(detail)

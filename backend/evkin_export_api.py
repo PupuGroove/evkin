@@ -185,6 +185,15 @@ app.include_router(create_reset_router(lambda: DUCKDB_PATH, lambda: DB_PATH))
 from backend.module_reset import create_router as create_module_reset_router
 app.include_router(create_module_reset_router(lambda: DUCKDB_PATH))
 EXCEL_INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+EXPORT_PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class ExportValidationError(ValueError):
+    def __init__(self, code: str, message: str, status_code: int = 400):
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
 WORKFLOW_TABLES = {
     "config": "workflow_config",
     "master_data": "master_data",
@@ -375,8 +384,7 @@ def read_workflow_table_global(table: str, bulan: str, unit: Optional[str], jaba
             if 'jabatan' in cols and jabatan:
                 where_clauses.append('jabatan = ?')
                 params.append(jabatan)
-            if where_clauses:
-                sql = sql + ' WHERE ' + ' AND '.join(where_clauses)
+            sql, params = build_export_query(table, bulan, cols, unit, jabatan)
             df = dconn.execute(sql, params).fetchdf()
             return df
         finally:
@@ -428,6 +436,32 @@ def _write_workbook_stream(output: io.BytesIO, sheets: dict[str, pd.DataFrame]) 
             _write_df_split(df, sheet_name)
 
 
+def build_export_query(table: str, bulan: str, columns: set[str], unit: Optional[str] = None,
+                       jabatan: Optional[str] = None) -> tuple[str, list[str]]:
+    if not EXPORT_PERIOD_RE.fullmatch(str(bulan or "")):
+        raise ExportValidationError("EXPORT_SOURCE_NOT_READY", f"Periode export tidak valid: {bulan!r}.")
+    if table not in set(WORKFLOW_TABLES.values()):
+        raise ExportValidationError("EXPORT_SOURCE_NOT_READY", f"Unsupported export source: {table}.")
+    if not columns or columns == {"_empty"}:
+        raise ExportValidationError("EXPORT_SOURCE_NOT_FOUND",
+                                    f"Data sumber export '{table}' periode {bulan} belum tersedia.", 404)
+    clauses = []
+    params: list[str] = []
+    if "bulan" in columns:
+        clauses.append('"bulan" = ?')
+        params.append(bulan)
+    if unit and "unit" in columns:
+        clauses.append('"unit" = ?')
+        params.append(unit)
+    if jabatan and "jabatan" in columns:
+        clauses.append('"jabatan" = ?')
+        params.append(jabatan)
+    query = f'SELECT * FROM "{table}"'
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    return query, params
+
+
 def read_workflow_table_duckdb(table: str, bulan: str, unit: Optional[str] = None, jabatan: Optional[str] = None) -> pd.DataFrame:
     """Read a workflow table directly from DuckDB applying filters in SQL.
     If DuckDB is unavailable or the table does not exist, raise HTTPException(503).
@@ -442,8 +476,8 @@ def read_workflow_table_duckdb(table: str, bulan: str, unit: Optional[str] = Non
             except Exception:
                 cols = set()
             if not cols:
-                # Table missing in DuckDB
-                raise HTTPException(status_code=404, detail=f"Table '{table}' not found in DuckDB")
+                raise ExportValidationError("EXPORT_SOURCE_NOT_FOUND",
+                                            f"Data sumber export '{table}' belum tersedia.", 404)
             where_clauses = []
             params = []
             if 'bulan' in cols and bulan:
@@ -455,18 +489,24 @@ def read_workflow_table_duckdb(table: str, bulan: str, unit: Optional[str] = Non
             if 'jabatan' in cols and jabatan:
                 where_clauses.append('jabatan = ?')
                 params.append(jabatan)
-            if where_clauses:
-                sql = sql + ' WHERE ' + ' AND '.join(where_clauses)
+            sql, params = build_export_query(table, bulan, cols, unit, jabatan)
             df = dconn.execute(sql, params).fetchdf()
             return df
         finally:
             dconn.close()
+    except ExportValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={
+            "code": exc.code,
+            "message": exc.message,
+        }) from exc
     except HTTPException:
-        # propagate 404
         raise
-    except Exception as e:
-        # DuckDB unavailable / other I/O error
-        raise HTTPException(status_code=503, detail=f'DuckDB error: {e}') from e
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "EXPORT_QUERY_ERROR",
+            "message": f"Gagal menjalankan query export untuk sumber '{table}'.",
+            "error": str(exc),
+        }) from exc
 
 
 def safe_excel_value(value: Any) -> Any:
@@ -1243,6 +1283,8 @@ def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: li
     try:
         _update_job(job_id, status='running', started_at=_now_iso(), progress=0.01, message='Starting export')
         try:
+            if not EXPORT_PERIOD_RE.fullmatch(str(bulan or "")):
+                raise ExportValidationError("EXPORT_SOURCE_NOT_READY", f"Periode export tidak valid: {bulan!r}.")
             if fmt not in ('xlsx', 'csv'):
                 fmt = 'xlsx'
             # Build sheet -> table mapping same as export_workbook
@@ -1256,6 +1298,12 @@ def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: li
                 'FINAL + SKP KOMBINASI': 'final_combined_skp',
             }
             selected = sheet_names or list(tables.keys())
+            unsupported = [name for name in selected if name not in tables]
+            if unsupported:
+                raise ExportValidationError(
+                    "EXPORT_SOURCE_NOT_READY",
+                    "Unsupported export source: " + ", ".join(unsupported),
+                )
             total_sheets = len(selected)
             written_sheets = 0
 
@@ -1360,7 +1408,10 @@ def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: li
         except Exception as e:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
-            _update_job(job_id, status='failed', finished_at=_now_iso(), message=f'Export failed: {e}', progress=0.0)
+            code = e.code if isinstance(e, ExportValidationError) else 'EXPORT_QUERY_ERROR'
+            message = e.message if isinstance(e, ExportValidationError) else str(e)
+            _update_job(job_id, status='failed', finished_at=_now_iso(),
+                        message=f'{code}: {message}', progress=0.0)
             raise
     finally:
         conn.close()
@@ -2031,10 +2082,27 @@ def create_export_job(payload: dict) -> dict:
     """
     bulan = str(payload.get('bulan') or '')
     if not bulan:
-        raise HTTPException(status_code=400, detail='Missing bulan')
+        raise HTTPException(status_code=400, detail={
+            "code": "EXPORT_SOURCE_NOT_READY",
+            "message": "Periode export wajib diisi.",
+        })
+    if not EXPORT_PERIOD_RE.fullmatch(bulan):
+        raise HTTPException(status_code=400, detail={
+            "code": "EXPORT_SOURCE_NOT_READY",
+            "message": f"Periode export tidak valid: {bulan}.",
+        })
     unit = payload.get('unit')
     jabatan = payload.get('jabatan')
     sheet_names = payload.get('sheet_names') or []
+    unsupported = [name for name in sheet_names if name not in {
+        'DATA SUMBER', 'HITUNG HARIAN', 'REKAP SDM', 'FINAL ABSENSI',
+        'FINAL + SKP', 'FINAL KOMBINASI', 'FINAL + SKP KOMBINASI',
+    }]
+    if unsupported:
+        raise HTTPException(status_code=400, detail={
+            "code": "EXPORT_SOURCE_NOT_READY",
+            "message": "Unsupported export source: " + ", ".join(unsupported),
+        })
     fmt = str(payload.get('format') or 'xlsx').lower()
     if fmt not in ('xlsx', 'csv'):
         fmt = 'xlsx'

@@ -34,6 +34,18 @@ def test_verification_persists_and_readiness_reload(tmp_path):
     assert result["ready"] is True
 
 
+def test_verification_materializes_semifinal_from_canonical_daily_and_is_repeatable(tmp_path):
+    path = setup_db(tmp_path)
+    with duckdb.connect(path) as conn:
+        conn.execute("CREATE OR REPLACE TABLE anomali (_empty VARCHAR)")
+    first = record_verification(path, PERIOD)
+    second = record_verification(path, PERIOD)
+    assert first["rows"] == 2
+    assert second["verified"] is True
+    with duckdb.connect(path) as conn:
+        assert conn.execute("SELECT count(*) FROM anomali WHERE bulan = ?", [PERIOD]).fetchone()[0] == 2
+
+
 def test_final_gate_rejects_unverified_and_reports_reason(tmp_path):
     path = setup_db(tmp_path)
     result = validate_final_readiness(path, PERIOD)

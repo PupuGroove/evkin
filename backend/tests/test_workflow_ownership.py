@@ -36,11 +36,16 @@ def test_configuration_nested_values_and_workflow_records_roundtrip(isolated):
                                 '_workflow':{'month':'2026-08'}},
                        'processed_data':[{'record':json.dumps(record)}],
                        'daily_data':[{'nip':'001','flags':['Tidak lengkap']}]})
-    result = api.get_workflow_state()['data']
+    state = api.get_workflow_state()
+    result = state['data']
     assert result['config']['jamDasar']['senKam']['masuk']=='08:00'
     assert result['config']['leavePeriods'][0]['nip']=='001'
-    assert result['daily_data'][0]['flags']==['Tidak lengkap']
-    assert json.loads(result['processed_data'][0]['record'])==record
+    assert set(result) == {'config'}
+    assert state['meta']['total_row_counts']['daily_data'] == 1
+    daily = api.get_workflow_data('daily_data', 1, 100, None, 'default')
+    processed = api.get_workflow_data('processed_data', 1, 100, '2026-08', 'default')
+    assert daily['rows'][0]['flags']==['Tidak lengkap']
+    assert json.loads(processed['rows'][0]['record'])==record
 
 
 @pytest.mark.parametrize('source', ['master_data', 'sdm_master', 'tukin_final_monthly'])
@@ -59,6 +64,62 @@ def test_config_is_identical_for_bulk_and_chunked_routes_without_master_cache(is
     state = api.get_workflow_state()['data']
     assert state['config'] == {'minDurasiJam': 7.5}
     assert 'master_data' not in state
+
+
+def test_state_is_metadata_only_and_small_for_large_workflow(isolated):
+    rows = [{'nip': str(index), 'tanggal': '2026-08-01', 'payload': 'x' * 200} for index in range(1200)]
+    api.sync_workflow({'raw_import': rows, 'daily_data': rows})
+    result = api.get_workflow_state()
+    assert set(result['data']) == {'config'}
+    assert result['meta']['total_row_counts']['raw_import'] == 1200
+    assert result['meta']['total_row_counts']['daily_data'] == 1200
+    assert len(json.dumps(result, default=str).encode('utf-8')) < 20_000
+
+
+def test_workflow_data_paginates_and_filters_period(isolated):
+    rows = [
+        {'nip': f'A-{index:03d}', 'tanggal': '2026-08-01'} for index in range(135)
+    ] + [
+        {'nip': f'B-{index:03d}', 'tanggal': '2026-09-01'} for index in range(15)
+    ]
+    api.sync_workflow({'raw_import': rows})
+    first = api.get_workflow_data('raw_import', 1, 100, '2026-08', 'default')
+    second = api.get_workflow_data('raw_import', 2, 100, '2026-08', 'default')
+    assert first['total'] == 135 and first['total_pages'] == 2 and len(first['rows']) == 100
+    assert len(second['rows']) == 35
+    assert all(str(row['tanggal']).startswith('2026-08') for row in first['rows'] + second['rows'])
+
+
+def test_scoped_chunk_replace_preserves_other_workflow(isolated):
+    with duckdb.connect(isolated) as conn:
+        conn.execute("CREATE OR REPLACE TABLE raw_import(workflow_id VARCHAR,nip VARCHAR,tanggal VARCHAR)")
+        conn.execute("INSERT INTO raw_import VALUES ('OTHER','KEEP','2026-08-01')")
+    api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':True,
+                             'rows':[{'workflow_id':'ACTIVE','nip':'FIRST','tanggal':'2026-08-01'}]})
+    api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':False,
+                             'rows':[{'workflow_id':'ACTIVE','nip':'SECOND','tanggal':'2026-08-02'}]})
+    with duckdb.connect(isolated) as conn:
+        stored = conn.execute('SELECT workflow_id,nip FROM raw_import ORDER BY workflow_id,nip').fetchall()
+    assert stored == [('ACTIVE','FIRST'), ('ACTIVE','SECOND'), ('OTHER','KEEP')]
+
+
+def test_chunked_import_matches_bulk_without_touching_master_domains(isolated):
+    rows = [{'nip': f'{index:04d}', 'tanggal': '2026-08-01'} for index in range(205)]
+    with duckdb.connect(isolated) as conn:
+        conn.execute("CREATE TABLE pengembalian_master_guard AS SELECT 'RETURN' marker")
+    api.sync_workflow({'raw_import': rows})
+    with duckdb.connect(isolated) as conn:
+        bulk = conn.execute('SELECT nip,tanggal FROM raw_import ORDER BY nip').fetchall()
+    api.sync_workflow_table({'source':'raw_import', 'rows':rows[:100], 'replace':True})
+    api.sync_workflow_table({'source':'raw_import', 'rows':rows[100:200], 'replace':False})
+    api.sync_workflow_table({'source':'raw_import', 'rows':rows[200:], 'replace':False})
+    with duckdb.connect(isolated) as conn:
+        chunked = conn.execute('SELECT nip,tanggal FROM raw_import ORDER BY nip').fetchall()
+        assert conn.execute('SELECT nip FROM master_data').fetchall() == [('MASTER',)]
+        assert conn.execute('SELECT nip FROM sdm_master').fetchall() == [('MASTER',)]
+        assert conn.execute('SELECT marker FROM pengembalian_master_guard').fetchall() == [('RETURN',)]
+    assert chunked == bulk
+    assert len(chunked) == len(set(chunked)) == len(rows)
 
 
 def test_bulk_failure_rolls_back_previous_tables(isolated, monkeypatch):

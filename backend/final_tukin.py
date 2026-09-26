@@ -3,6 +3,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import importlib
 import io
 import json
 import re
@@ -13,20 +14,27 @@ from zipfile import BadZipFile
 import duckdb
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils.exceptions import InvalidFileException
+from backend.skp_assessment import (
+    VALID_PREDICATES as CANONICAL_SKP_RATES,
+    annotate_skp_tukin_provenance,
+    canonical_skp_reduction_rate,
+    resolve_skp_for_tukin,
+    skp_ready_for_tukin,
+)
+from backend.tukin_combined import (
+    calculation_scope,
+    calculate_tukin_amounts,
+    integration_readiness,
+)
+
+ensure_integration_schema = importlib.import_module(
+    'backend.migrations.048_create_canonical_tukin_integration'
+).ensure_canonical_tukin_integration_schema
 
 MODES = {'ABSENSI_ONLY', 'ABSENSI_SKP'}
 SOURCES = {'ASSESSMENT', 'TEMPLATE_IMPORT', 'EXTERNAL_IMPORT'}
 SKP_UNAVAILABLE_LABELS = {'-', 'TIDAK BISA DINILAI', 'TIDAK MEMBUAT SKP'}
-SKP_NORMAL_RATES = {
-    'SANGAT BAIK': 0,
-    'BAIK': 0,
-    'BUTUH PERBAIKAN': 5,
-    'KURANG': 10,
-    'SANGAT KURANG': 15,
-}
+SKP_NORMAL_RATES = dict(CANONICAL_SKP_RATES)
 
 
 def resolve_skp_rate(skp_result):
@@ -45,25 +53,10 @@ def resolve_skp_rate(skp_result):
             return None
         return float(explicit_rate)
 
+    canonical_status = report_status
     if predicate in {'-', ''} or predicate in SKP_UNAVAILABLE_LABELS:
-        if consecutive_missing >= 3:
-            return 100
-        if consecutive_missing == 2:
-            return 70
-        if consecutive_missing == 1:
-            return 35
-        return 100
-    if report_status in {'NOT_SUBMITTED_VERIFIED', 'DATA_MISSING', 'INVALID_PREDICATE', 'REVIEW_REQUIRED'}:
-        if consecutive_missing >= 3:
-            return 100
-        if consecutive_missing == 2:
-            return 70
-        if consecutive_missing == 1:
-            return 35
-        return 100
-    if predicate in SKP_NORMAL_RATES:
-        return SKP_NORMAL_RATES[predicate]
-    return None
+        canonical_status = 'NOT_SUBMITTED_VERIFIED'
+    return canonical_skp_reduction_rate(predicate, canonical_status, consecutive_missing)
 
 
 def signature(value):
@@ -101,6 +94,8 @@ def calculate_final_tukin(nip, periode, mode, attendance_result, employee_master
         'potongan_absen_rp', 'predikat_skp', 'komponen_skp_70', 'potongan_skp_percent',
         'potongan_skp_rp', 'total_potongan', 'tukin_dibayar', 'skp_result_id')})
     row.update(status='READY', reason='', skp_source='TIDAK DIGUNAKAN', status_skp='TIDAK DIGUNAKAN',
+               skp_source_status='TIDAK DIGUNAKAN', skp_calculation_mode='TIDAK DIGUNAKAN',
+               skp_fallback_policy=None, skp_description='',
                attendance_result_id=absence.get('id') or signature([nip, periode, absence]))
     issues = []
     gross = decimal(person.get('tukin_gross'))
@@ -123,13 +118,35 @@ def calculate_final_tukin(nip, periode, mode, attendance_result, employee_master
         row.update(skp_source=skp.get('source_type'), status_skp=skp.get('status_skp'),
                    predikat_skp=skp.get('predikat_skp'), skp_result_id=skp.get('id'))
         if not skp_result:
-            issues.append('SKP_NOT_FOUND')
+            semantic = resolve_skp_for_tukin(None, attendance_participant=bool(attendance_result))
+            row.update(skp_source='TIDAK TERSEDIA', status_skp=semantic['source_status'],
+                       skp_source_status=semantic['source_status'],
+                       skp_calculation_mode=semantic['ready_mode'],
+                       skp_fallback_policy=semantic['fallback_policy'],
+                       skp_description=semantic['description'], predikat_skp='SKP TIDAK TERSEDIA')
+            if semantic['ready']:
+                skp_rate = semantic['fallback_rate']
+            else:
+                issues.append('SKP_NOT_FOUND')
         elif skp.get('_duplicate'):
             issues.append('DUPLICATE_SKP')
         else:
-            required = 'APPROVED' if skp.get('source_type') == 'ASSESSMENT' else 'IMPORTED_FINAL'
-            if skp.get('status_skp') != required:
+            if skp.get('source_type') in {'ASSESSMENT', 'DIRECT_FINAL_IMPORT'}:
+                semantic = skp_ready_for_tukin(
+                    skp.get('assessment') or skp,
+                    skp.get('source_type') == 'DIRECT_FINAL_IMPORT',
+                )
+                if not semantic['ready']:
+                    issues.append('SKP_NOT_FINAL')
+                row.update(skp_source_status=semantic['source_status'],
+                           skp_calculation_mode=semantic['ready_mode'],
+                           skp_fallback_policy=semantic['fallback_policy'],
+                           skp_description=semantic['description'])
+            elif skp.get('status_skp') != 'IMPORTED_FINAL':
                 issues.append('SKP_NOT_FINAL')
+            else:
+                row.update(skp_source_status='FINAL_IMPORTED', skp_calculation_mode='NORMAL',
+                           skp_fallback_policy=None, skp_description='SKP final tersedia')
             skp_rate = resolve_skp_rate(skp)
             predicate = str(skp.get('predikat_skp') or '').strip().upper()
             if skp_rate is None and predicate in SKP_UNAVAILABLE_LABELS:
@@ -138,7 +155,7 @@ def calculate_final_tukin(nip, periode, mode, attendance_result, employee_master
                 issues.append('INVALID_PERCENTAGE')
             if skp.get('payment_eligible') is False:
                 issues.append('SKP_PAYMENT_HOLD')
-        if skp.get('nip') not in (None, str(nip)) or skp.get('periode') not in (None, periode):
+        if skp_result and (skp.get('nip') not in (None, str(nip)) or skp.get('periode') not in (None, periode)):
             issues.append('SKP_NOT_FOUND')
     if gross is not None and gross >= 0:
         row['tukin_bruto'] = rupiah(gross)
@@ -153,11 +170,12 @@ def calculate_final_tukin(nip, periode, mode, attendance_result, employee_master
     if issues:
         row.update(status='HOLD', reason=';'.join(dict.fromkeys(issues)))
         return row
-    row['potongan_absen_rp'] = rupiah(Decimal(row['komponen_absen_30']) * rate / 100)
+    amounts = calculate_tukin_amounts(gross, rate, skp_rate if mode == 'ABSENSI_SKP' else 0)
+    row['potongan_absen_rp'] = amounts['attendance_deduction']
     if mode == 'ABSENSI_SKP':
-        row['potongan_skp_rp'] = rupiah(Decimal(row['komponen_skp_70']) * Decimal(str(skp_rate)) / Decimal('100'))
+        row['potongan_skp_rp'] = amounts['skp_deduction']
     row['total_potongan'] = row['potongan_absen_rp'] + (row['potongan_skp_rp'] or 0)
-    row['tukin_dibayar'] = row['tukin_bruto'] - row['total_potongan']
+    row['tukin_dibayar'] = amounts['calculated_entitlement']
     assert row['tukin_dibayar'] >= 0
     assert row['tukin_bruto'] == row['tukin_dibayar'] + row['potongan_absen_rp'] + (row['potongan_skp_rp'] or 0)
     return row
@@ -206,6 +224,7 @@ def migrate(db_path):
                           [str(uuid.uuid4()), name, rate, '1900-01-01', 'Konfigurasi awal; tinjau sesuai kebijakan instansi'])
             c.execute('INSERT INTO final_tukin_schema(version) VALUES(1)')
         c.execute('INSERT INTO final_tukin_schema(version) VALUES(2) ON CONFLICT DO NOTHING')
+        ensure_integration_schema(c)
         c.execute('COMMIT')
 
 
@@ -293,6 +312,9 @@ class FinalTukinService:
         return rows[0][0] if len(rows) == 1 else None
 
     def preview_import(self, content, filename, periode, source_type, sheet=None, mapping=None, header_row=None, percent_unit='POINTS'):
+        from openpyxl import load_workbook
+        from openpyxl.utils.exceptions import InvalidFileException
+
         period(periode)
         if source_type not in SOURCES - {'ASSESSMENT'}:
             raise ValueError('Pilih TEMPLATE_IMPORT atau EXTERNAL_IMPORT')
@@ -439,7 +461,10 @@ class FinalTukinService:
                     history = {r['nip']:r for r in records(c,'tukin_skp_monthly',{'assessment_period':periode})}
                     conditions = records(c,'skp_condition_decision',{'assessment_period':periode,'status':'APPROVED'})
                     rules={}
-                    for r in records(c,'skp_assessment_monthly',{'assessment_period':periode}):
+                    assessment_rows = annotate_skp_tukin_provenance(
+                        c, periode, records(c,'skp_assessment_monthly',{'assessment_period':periode})
+                    )
+                    for r in assessment_rows:
                         predicate = str(r.get('final_predicate') or '').upper()
                         if predicate not in rules: rules[predicate]=self.rule_rate(c,predicate,periode)
                         rate = rules[predicate]
@@ -448,8 +473,10 @@ class FinalTukinService:
                         payment_eligible=False if any(d.get('payment_effect') in {'HOLD','UNPAID'} for d in decisions) else previous.get('payment_eligible')
                         if r.get('report_status') != 'SUBMITTED':
                             rate = previous.get('skp_reduction_rate')
+                        direct = bool(r.get('_direct_final_import'))
                         skp.append(dict(id=str(uuid.uuid5(uuid.NAMESPACE_URL,signature([r,previous,rate,decisions]))),nip=r['nip'],periode=periode,
-                            predikat_skp=predicate,potongan_skp_percent=rate,status_skp=r['review_status'],source_type='ASSESSMENT',
+                            predikat_skp=predicate,potongan_skp_percent=rate,status_skp=r['review_status'],
+                            source_type='DIRECT_FINAL_IMPORT' if direct else 'ASSESSMENT',
                             payment_eligible=payment_eligible,assessment=r, history=previous,decisions=decisions))
                 else:
                     if not skp_batch_id:
@@ -551,12 +578,311 @@ class FinalTukinService:
                 c.execute("UPDATE final_tukin_results SET status='OUTDATED',reason='SOURCE_CHANGED',updated_at=now() WHERE id IN ("+','.join('?' for _ in ids)+')',ids)
         return dict(batch=batch,rows=output,source_changed=current['preview_signature']!=batch['source_signature'])
 
+    def calculation_results(self, calculation_id):
+        """Read a canonical calculation snapshot without recalculating it."""
+        with duckdb.connect(self.db_path) as c:
+            ensure_integration_schema(c)
+            batch = c.execute(
+                """SELECT id,assessment_period,version,calculation_version,status,source_fingerprint,
+                          mismatch_count,ready_count,calculated_by,calculated_at
+                   FROM tukin_calculation_batch WHERE id=?""", [calculation_id]
+            ).fetchone()
+            if not batch:
+                raise ValueError('Calculation snapshot tidak ditemukan')
+            rows = c.execute(
+                """SELECT snapshot,status,tukin_gross,attendance_deduction,skp_deduction,
+                          adjustment,total_deduction,tukin_paid,attendance_source_id,
+                          attendance_batch_id,skp_source_id,skp_source_version,skp_batch_id,
+                          master_version,calculated_at
+                   FROM tukin_calculation_result WHERE calculation_id=? ORDER BY nip""",
+                [calculation_id],
+            ).fetchall()
+        keys = ['calculation_id','assessment_period','version','calculation_version','status',
+                'source_fingerprint','mismatch_count','ready_count','calculated_by','calculated_at']
+        row_keys = ['snapshot_status','tukin_gross','attendance_deduction','skp_deduction',
+                    'adjustment','total_deduction','tukin_paid','attendance_source_id',
+                    'attendance_batch_id','skp_source_id','skp_source_version','skp_batch_id',
+                    'master_version','calculated_at']
+        output = []
+        for stored in rows:
+            row = json.loads(stored[0])
+            row.update({key: value for key, value in zip(row_keys, stored[1:])})
+            # Stable canonical aliases consumed by Final UI/export. No arithmetic occurs here.
+            row.update(
+                periode=batch[1],
+                tukin_bruto=stored[2],
+                komponen_absensi=row.get('attendance_component'),
+                potongan_absensi=stored[3],
+                komponen_skp=row.get('skp_component'),
+                potongan_skp=stored[4],
+                adjustment=stored[5],
+                total_potongan=stored[6],
+                tukin_dibayar=stored[7],
+            )
+            output.append(row)
+        batch_data = dict(zip(keys, batch))
+        scope = output[0].get('scope', 'all') if output else 'all'
+        batch_data['scope'] = scope
+        current = integration_readiness(self.db_path, batch_data['assessment_period'], scope)
+        batch_data['source_status'] = (
+            'CURRENT' if current['source_fingerprint'] == batch_data['source_fingerprint'] else 'STALE'
+        )
+        return {'batch': batch_data, 'rows': output}
+
+    def calculations(self, assessment_period=''):
+        if assessment_period:
+            period(assessment_period)
+        with duckdb.connect(self.db_path) as c:
+            ensure_integration_schema(c)
+            query = """SELECT id calculation_id,assessment_period,version,calculation_version,status,
+                              source_fingerprint,mismatch_count,ready_count,calculated_by,calculated_at
+                       FROM tukin_calculation_batch"""
+            params = []
+            if assessment_period:
+                query += ' WHERE assessment_period=?'
+                params.append(assessment_period)
+            query += ' ORDER BY assessment_period DESC,version DESC'
+            cursor = c.execute(query, params)
+            names = [item[0] for item in cursor.description]
+            rows = [dict(zip(names, values)) for values in cursor.fetchall()]
+            for row in rows:
+                row['scope'] = calculation_scope(c, row['calculation_id'])
+        readiness = {}
+        for row in rows:
+            p = row['assessment_period']
+            key = (p, row['scope'])
+            if key not in readiness:
+                readiness[key] = integration_readiness(self.db_path, p, row['scope'])
+            row['source_status'] = (
+                'CURRENT' if row['source_fingerprint'] == readiness[key]['source_fingerprint'] else 'STALE'
+            )
+        return rows
+
+    def approve_calculation(self, calculation_id, approved_by, reason):
+        """Lock Final Tukin to one immutable calculation snapshot."""
+        approved_by = str(approved_by or '').strip()
+        reason = str(reason or '').strip()
+        if not approved_by or not reason:
+            raise ValueError('Approver dan alasan persetujuan wajib diisi')
+        snapshot = self.calculation_results(calculation_id)
+        batch = snapshot['batch']
+        if batch['status'] != 'CALCULATED':
+            raise ValueError('Hanya calculation berstatus CALCULATED yang dapat disetujui')
+        if not batch['ready_count']:
+            raise ValueError('Calculation snapshot tidak memiliki hasil siap Final')
+        if int(batch.get('mismatch_count') or 0) > 0:
+            raise ValueError(
+                f"Finalisasi diblokir: {batch['mismatch_count']} NIP/data sumber masih perlu diperbaiki"
+            )
+        if batch['source_status'] == 'STALE':
+            raise ValueError('Sumber berubah setelah perhitungan; buat calculation version baru')
+        decision_id = str(uuid.uuid4())
+        with duckdb.connect(self.db_path) as c:
+            ensure_integration_schema(c)
+            c.execute('BEGIN TRANSACTION')
+            try:
+                existing = c.execute(
+                    """SELECT calculation_id,status FROM tukin_final_decision
+                       WHERE assessment_period=? ORDER BY created_at DESC LIMIT 1""",
+                    [batch['assessment_period']],
+                ).fetchone()
+                if existing and existing[0] == calculation_id:
+                    raise ValueError('Calculation ini sudah memiliki Final Tukin')
+                if existing and existing[1] == 'PAID':
+                    raise ValueError('Periode sudah dibayar; Final baru tidak dapat dibuat')
+                if existing:
+                    previous = c.execute(
+                        'SELECT version FROM tukin_calculation_batch WHERE id=?', [existing[0]]
+                    ).fetchone()
+                    if previous and int(previous[0]) >= int(batch['version']):
+                        raise ValueError('Final baru harus menunjuk calculation version yang lebih baru')
+                c.execute(
+                    """INSERT INTO tukin_final_decision
+                       (id,assessment_period,calculation_id,calculation_version,status,
+                        approved_by,approved_at,locked_at,reason,created_at,updated_at)
+                       VALUES (?,?,?,?, 'FINAL',?,now(),now(),?,now(),now())""",
+                    [decision_id, batch['assessment_period'], calculation_id,
+                     int(batch['version']), approved_by, reason],
+                )
+                c.execute('COMMIT')
+            except Exception:
+                c.execute('ROLLBACK')
+                raise
+        return {'status': 'FINAL', 'final_decision_id': decision_id,
+                'calculation_id': calculation_id, 'calculation_version': batch['version'],
+                'assessment_period': batch['assessment_period']}
+
+    def final_decisions(self, assessment_period=''):
+        with duckdb.connect(self.db_path) as c:
+            ensure_integration_schema(c)
+            query = """SELECT d.*,b.status calculation_status,b.calculation_version engine_version,
+                              b.ready_count,b.mismatch_count,b.source_fingerprint,b.calculated_at
+                       FROM tukin_final_decision d JOIN tukin_calculation_batch b ON b.id=d.calculation_id"""
+            params = []
+            if assessment_period:
+                period(assessment_period)
+                query += ' WHERE d.assessment_period=?'
+                params.append(assessment_period)
+            query += ' ORDER BY d.created_at DESC,d.calculation_version DESC'
+            cursor = c.execute(query, params)
+            names = [item[0] for item in cursor.description]
+            rows = [dict(zip(names, values)) for values in cursor.fetchall()]
+            for row in rows:
+                row['scope'] = calculation_scope(c, row['calculation_id'])
+        by_period = {}
+        readiness = {}
+        for row in rows:
+            p = row['assessment_period']
+            by_period.setdefault(p, row['id'])
+            key = (p, row['scope'])
+            if key not in readiness:
+                readiness[key] = integration_readiness(self.db_path, p, row['scope'])
+            row['is_current_decision'] = row['id'] == by_period[p]
+            row['source_status'] = (
+                'CURRENT' if row['source_fingerprint'] == readiness[key]['source_fingerprint'] else 'STALE'
+            )
+            row['display_status'] = (
+                row['status'] if row['is_current_decision'] else f"{row['status']} (SUPERSEDED)"
+            )
+        return rows
+
+    def final_decision(self, decision_id):
+        decisions = [row for row in self.final_decisions() if row['id'] == decision_id]
+        if not decisions:
+            raise ValueError('Final Tukin tidak ditemukan')
+        decision = decisions[0]
+        snapshot = self.calculation_results(decision['calculation_id'])
+        return {'decision': decision, 'batch': snapshot['batch'], 'rows': snapshot['rows']}
+
+    def mark_paid(self, decision_id, paid_by, payment_reference):
+        paid_by = str(paid_by or '').strip()
+        payment_reference = str(payment_reference or '').strip()
+        if not paid_by or not payment_reference:
+            raise ValueError('Petugas dan referensi pembayaran wajib diisi')
+        with duckdb.connect(self.db_path) as c:
+            ensure_integration_schema(c)
+            c.execute('BEGIN TRANSACTION')
+            try:
+                decision = c.execute(
+                    'SELECT status,assessment_period FROM tukin_final_decision WHERE id=?', [decision_id]
+                ).fetchone()
+                if not decision:
+                    raise ValueError('Final Tukin tidak ditemukan')
+                if decision[0] == 'PAID':
+                    raise ValueError('Final Tukin sudah dibayar')
+                if decision[0] != 'FINAL':
+                    raise ValueError('Hanya Final Tukin terkunci yang dapat dibayar')
+                latest = c.execute(
+                    """SELECT id FROM tukin_final_decision WHERE assessment_period=?
+                       ORDER BY created_at DESC,calculation_version DESC LIMIT 1""", [decision[1]]
+                ).fetchone()
+                if not latest or latest[0] != decision_id:
+                    raise ValueError('Final Tukin ini sudah digantikan calculation version yang lebih baru')
+                c.execute(
+                    """UPDATE tukin_final_decision SET status='PAID',paid_by=?,paid_at=now(),
+                       payment_reference=?,updated_at=now() WHERE id=? AND status='FINAL'""",
+                    [paid_by, payment_reference, decision_id],
+                )
+                c.execute('COMMIT')
+            except Exception:
+                c.execute('ROLLBACK')
+                raise
+        return {'status': 'PAID', 'final_decision_id': decision_id}
+
+    def export_final_decision(self, decision_id):
+        """Export only a snapshot explicitly locked as FINAL or PAID."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
+        result = self.final_decision(decision_id)
+        decision = result['decision']
+        if decision['status'] not in {'FINAL', 'PAID'}:
+            raise ValueError('Hanya Final Tukin terkunci/dibayar yang dapat diekspor untuk pembayaran')
+        wb = Workbook()
+        metadata = wb.active
+        metadata.title = 'FINAL DECISION'
+        metadata.append(['Field', 'Value'])
+        for key in ('id','assessment_period','calculation_id','calculation_version','status',
+                    'approved_by','approved_at','locked_at','paid_by','paid_at',
+                    'payment_reference','reason','source_status','calculated_at'):
+            value = decision.get(key)
+            if isinstance(value, str) and value.startswith(('=', '+', '-', '@')):
+                value = "'" + value
+            metadata.append([key, value])
+        rows_sheet = wb.create_sheet('FINAL TUKIN')
+        columns = [
+            ('NIP','nip'),('Nama','nama'),('Jabatan','jabatan'),('Unit/Wilayah','unit'),
+            ('Flag 3T/Non-3T','wilayah_3t'),('Tukin Bruto','tukin_bruto'),
+            ('Predikat SKP','predicate_skp'),('Potongan SKP %','skp_rate'),
+            ('Komponen SKP 70%','komponen_skp'),('Potongan SKP Rp','potongan_skp'),
+            ('Potongan Absensi %','attendance_rate'),('Komponen Absensi 30%','komponen_absensi'),
+            ('Potongan Absensi Rp','potongan_absensi'),('Total Potongan Rp','total_potongan'),
+            ('Hak Tukin Final','tukin_dibayar'),('Status','payment_status'),('Keterangan','issues'),
+            ('tukin_dibayar','tukin_dibayar'),('calculation_id','calculation_id'),
+            ('version','version'),('snapshot_status','snapshot_status'),('calculated_at','calculated_at'),
+            ('attendance_source_id','attendance_source_id'),('attendance_batch_id','attendance_batch_id'),
+            ('skp_source_id','skp_source_id'),('skp_source_version','skp_source_version'),
+            ('skp_batch_id','skp_batch_id'),('master_version','master_version'),
+            # Appended audit columns keep the established Final export stable.
+            ('Sumber SKP','skp_source_label'),('Status Sumber SKP','skp_source_status'),
+            ('Mode Perhitungan SKP','skp_calculation_mode'),
+            ('Kebijakan Fallback SKP','skp_fallback_policy'),('Keterangan SKP','skp_description'),
+            ('Status Workflow SKP','skp_workflow_status'),('SKP Normal Siap Tukin','skp_ready_for_tukin'),
+        ]
+        rows_sheet.append([label for label, _ in columns])
+        for row in result['rows']:
+            rows_sheet.append([row.get(key) for _, key in columns])
+        for sheet in (metadata, rows_sheet):
+            sheet.freeze_panes = 'A2'
+            sheet.auto_filter.ref = sheet.dimensions
+            for cell in sheet[1]:
+                cell.font = Font(bold=True, color='FFFFFF')
+                cell.fill = PatternFill('solid', fgColor='17365D')
+        stream = io.BytesIO()
+        wb.save(stream)
+        stream.seek(0)
+        return stream
+
+    def legacy_preview_adapter(self, periode):
+        """Deprecated read-only adapter: latest canonical snapshot, never recalculated."""
+        calculations = self.calculations(periode)
+        if not calculations:
+            raise ValueError('Belum ada calculation snapshot canonical untuk periode ini')
+        result = self.calculation_results(calculations[0]['calculation_id'])
+        result['deprecated'] = True
+        result['replacement'] = '/api/final-tukin/calculation/{calculation_id}'
+        result['preview_signature'] = calculations[0]['calculation_id']
+        return result
+
+    def legacy_finalize_adapter(self, payload):
+        """Deprecated approval adapter. The signature is a canonical calculation id."""
+        calculation_id = payload.get('calculation_id') or payload.get('preview_signature')
+        result = self.approve_calculation(
+            calculation_id, payload.get('approved_by') or payload.get('created_by'),
+            payload.get('reason'),
+        )
+        return {**result, 'calculation_batch_id': calculation_id, 'deprecated': True,
+                'replacement': '/api/final-tukin/approve-calculation'}
+
+    def legacy_export_adapter(self, identifier):
+        """Resolve a legacy export identifier to its canonical Final Decision."""
+        decisions = self.final_decisions()
+        decision = next((row for row in decisions if row['id'] == identifier), None)
+        if decision is None:
+            decision = next((row for row in decisions if row['calculation_id'] == identifier), None)
+        if decision is None:
+            raise ValueError('Export legacy hanya tersedia untuk calculation yang sudah menjadi Final canonical')
+        return self.export_final_decision(decision['id'])
+
     def archive(self,batch_id):
         with duckdb.connect(self.db_path) as c:
             c.execute('UPDATE final_tukin_batches SET archived_at=now() WHERE id=? AND archived_at IS NULL',[batch_id])
         return {'archived':batch_id}
 
     def export(self,batch_id):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
         result = self.results(batch_id)
         rows = result['rows']
         wb = Workbook(); wb.remove(wb.active)
@@ -636,26 +962,66 @@ def create_router(db_path_getter):
         service=svc()
         with duckdb.connect(service.db_path) as c: return records(c,'skp_import_batches')
 
-    @router.post('/preview')
-    def preview(payload: dict): return run(lambda:svc().preview(**payload))
+    @router.post('/preview', deprecated=True)
+    def preview(payload: dict):
+        return run(lambda:svc().legacy_preview_adapter(str(payload.get('periode') or '')))
 
-    @router.post('/finalize')
-    def finalize(payload: dict): return run(lambda:svc().finalize(**payload))
+    @router.post('/finalize', deprecated=True)
+    def finalize(payload: dict): return run(lambda:svc().legacy_finalize_adapter(payload))
 
-    @router.get('/batches')
-    def batches(): return svc().batches()
+    @router.get('/batches', deprecated=True)
+    def batches():
+        return {'rows': svc().calculations(), 'deprecated': True,
+                'replacement': '/api/tukin/combined/calculations?assessment_period=YYYY-MM'}
 
-    @router.get('/results/{batch_id}')
-    def results(batch_id: str): return run(lambda:svc().results(batch_id))
+    @router.get('/results/{batch_id}', deprecated=True)
+    def results(batch_id: str):
+        result = run(lambda:svc().calculation_results(batch_id))
+        return {**result, 'deprecated': True,
+                'replacement': '/api/final-tukin/calculation/{calculation_id}'}
 
-    @router.post('/archive/{batch_id}')
+    @router.get('/calculations')
+    def calculations(assessment_period: str = ''):
+        return {'rows': run(lambda:svc().calculations(assessment_period))}
+
+    @router.get('/calculation/{calculation_id}')
+    def calculation(calculation_id: str):
+        return run(lambda:svc().calculation_results(calculation_id))
+
+    @router.post('/approve-calculation')
+    def approve_calculation(payload: dict):
+        return run(lambda:svc().approve_calculation(
+            payload.get('calculation_id'), payload.get('approved_by'), payload.get('reason')
+        ))
+
+    @router.get('/decisions')
+    def decisions(assessment_period: str = ''):
+        return {'rows': run(lambda:svc().final_decisions(assessment_period))}
+
+    @router.get('/decisions/{decision_id}')
+    def decision(decision_id: str):
+        return run(lambda:svc().final_decision(decision_id))
+
+    @router.post('/decisions/{decision_id}/paid')
+    def mark_paid(decision_id: str, payload: dict):
+        return run(lambda:svc().mark_paid(
+            decision_id, payload.get('paid_by'), payload.get('payment_reference')
+        ))
+
+    @router.get('/decisions/{decision_id}/export')
+    def export_decision(decision_id: str):
+        stream = run(lambda:svc().export_final_decision(decision_id))
+        return StreamingResponse(stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                 headers={'Content-Disposition':'attachment; filename="FINAL_TUKIN_LOCKED.xlsx"'})
+
+    @router.post('/archive/{batch_id}', deprecated=True)
     def archive(batch_id: str,payload: dict):
-        if payload.get('confirm') is not True: raise HTTPException(400,'Konfirmasi diperlukan')
-        return svc().archive(batch_id)
+        raise HTTPException(410, 'Arsip Final legacy dinonaktifkan; calculation snapshot canonical immutable')
 
-    @router.get('/export/{batch_id}')
+    @router.get('/export/{batch_id}', deprecated=True)
     def export(batch_id: str):
-        stream=run(lambda:svc().export(batch_id))
+        stream=run(lambda:svc().legacy_export_adapter(batch_id))
         return StreamingResponse(stream,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                 headers={'Content-Disposition':'attachment; filename="EVKIN_Final_Tukin.xlsx"'})
+                                 headers={'Content-Disposition':'attachment; filename="EVKIN_Final_Tukin_CANONICAL.xlsx"',
+                                          'Deprecation':'true'})
     return router

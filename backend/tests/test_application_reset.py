@@ -105,6 +105,26 @@ def test_repeated_reset_keeps_audit(tmp_path):
         assert conn.execute('SELECT count(*) FROM application_reset_audit').fetchone() == (2,)
 
 
+def test_operational_reset_classifies_master_audit_and_working_data(tmp_path):
+    svc = service(tmp_path)
+    audit_tables = ('skp_assessment_audit', 'skp_indicator_config_audit',
+                    'pengembalian_period_audit')
+    with duckdb.connect(str(svc.db_path)) as conn:
+        for table in audit_tables:
+            conn.execute(f'CREATE TABLE {table}(id INTEGER, value VARCHAR)')
+            conn.execute(f"INSERT INTO {table} VALUES (1, 'evidence')")
+    preview = svc.preview()
+    categories = {item['table']: item['category'] for item in preview['tables']}
+    assert categories['sdm_master'] == 'PRESERVE_MASTER'
+    assert categories['raw_import'] == 'DELETE_OPERATIONAL'
+    assert all(categories[table] == 'PRESERVE_AUDIT' for table in audit_tables)
+    svc.confirm(confirmation(svc))
+    with duckdb.connect(str(svc.db_path)) as conn:
+        for table in audit_tables:
+            assert conn.execute(f'SELECT value FROM {table}').fetchone() == ('evidence',)
+        assert conn.execute('SELECT count(*) FROM raw_import').fetchone() == (0,)
+
+
 def test_delete_failure_rolls_back_all_tables(tmp_path, monkeypatch):
     svc = service(tmp_path)
     original = svc._delete_table

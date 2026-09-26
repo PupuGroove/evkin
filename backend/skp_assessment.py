@@ -14,7 +14,9 @@ import uuid
 from typing import Any, Callable, Mapping, Optional
 
 import duckdb
-import pandas as pd
+from backend.lazy_imports import lazy_module
+
+pd = lazy_module("pandas")
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -34,6 +36,9 @@ ensure_condition_schema = importlib.import_module(
 ensure_third_missing_unpaid = importlib.import_module(
     "backend.migrations.041_enforce_third_missing_skp_unpaid"
 ).ensure_third_missing_skp_unpaid
+ensure_operational_schema = importlib.import_module(
+    "backend.migrations.049_create_skp_operational_workflow"
+).ensure_skp_operational_schema
 
 VALID_PREDICATES = {
     "SANGAT BAIK": 0.0,
@@ -43,7 +48,7 @@ VALID_PREDICATES = {
     "SANGAT KURANG": 15.0,
 }
 INDICATOR_STATUSES = {"MENCAPAI", "KURANG", "TIDAK_ADA", "BELUM_DINILAI"}
-REVIEW_STATUSES = {"PENDING_REVIEW", "RECOMMENDED", "RETURNED", "APPROVED"}
+REVIEW_STATUSES = {"PENDING_REVIEW", "RECOMMENDED", "RETURNED", "APPROVED", "FINAL_IMPORTED"}
 _LOCK = threading.Lock()
 _READY: set[str] = set()
 SKP_EXPORT_SHEETS = {
@@ -60,6 +65,7 @@ _EXPORT_JOBS_LOCK = threading.Lock()
 
 ALIASES = {
     "nip": ("nip", "nipbaru", "nomorindukpegawai"),
+    "assessment_period": ("periode", "periodepenilaian", "bulan", "assessmentperiod"),
     "nama": ("nama", "namapegawai", "namasdm"),
     "penilai": ("penilai", "namapenilai", "atasanpenilai"),
     "jabatan": ("jabatan", "namajabatan"),
@@ -116,6 +122,25 @@ def _period(value: Any) -> str:
     return result
 
 
+def _source_period(value: Any, fallback_year: str) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    match = re.search(r"(20\d{2})[-/](0?[1-9]|1[0-2])", raw)
+    if match:
+        return f"{match.group(1)}-{int(match.group(2)):02d}"
+    months = {
+        "JANUARI": 1, "FEBRUARI": 2, "MARET": 3, "APRIL": 4, "MEI": 5, "JUNI": 6,
+        "JULI": 7, "AGUSTUS": 8, "SEPTEMBER": 9, "OKTOBER": 10, "NOVEMBER": 11, "DESEMBER": 12,
+    }
+    upper = _predicate(raw)
+    for name, month in months.items():
+        if name in upper:
+            year_match = re.search(r"20\d{2}", raw)
+            return f"{year_match.group(0) if year_match else fallback_year}-{month:02d}"
+    return raw
+
+
 def _predicate(value: Any) -> str:
     return re.sub(r"\s+", " ", _text(value)).upper()
 
@@ -151,7 +176,14 @@ def _indicator(value: Any) -> str:
     return "BELUM_DINILAI"
 
 
-def _report_status(predicate: str, value: Any) -> str:
+def classify_skp_report_status(predicate: Any, value: Any = "") -> str:
+    """Canonical SKP report classification shared by every Tukin consumer.
+
+    Exemptions are explicit governance decisions and therefore take precedence
+    over free-text non-submission phrases.  Consumers must not reimplement this
+    ordering because it directly affects streaks and payment eligibility.
+    """
+    predicate = _predicate(predicate)
     raw = f"{predicate} {_predicate(value)}"
     if "MELAHIRKAN" in raw:
         return "EXEMPT_MATERNITY"
@@ -171,6 +203,142 @@ def _report_status(predicate: str, value: Any) -> str:
     return "INVALID_PREDICATE"
 
 
+def canonical_skp_reduction_rate(
+    predicate: Any,
+    report_status: Any,
+    consecutive_missing: Any = 0,
+) -> Optional[float]:
+    """Return the governed SKP reduction percentage or ``None`` if unresolved."""
+    normalized = _predicate(predicate)
+    status = _predicate(report_status).replace(" ", "_")
+    if status == "SUBMITTED":
+        return VALID_PREDICATES.get(normalized)
+    if status == "NOT_SUBMITTED_VERIFIED":
+        try:
+            streak = max(0, int(consecutive_missing or 0))
+        except (TypeError, ValueError):
+            return None
+        return 35.0 if streak == 1 else 70.0 if streak == 2 else 100.0
+    if status.startswith("EXEMPT_") or status == "MIGRATED_SNAPSHOT":
+        return 0.0
+    return None
+
+
+def resolve_skp_for_tukin(
+    row: Optional[Mapping[str, Any]],
+    direct_final_import: bool = False,
+    attendance_participant: bool = False,
+) -> dict[str, Any]:
+    """Resolve one SKP source into the canonical Tukin calculation semantic."""
+    if not row:
+        if attendance_participant:
+            return {
+                "ready": True, "source_type": "MISSING",
+                "source_status": "MISSING_FROM_FINAL_IMPORT", "ready_mode": "FALLBACK",
+                "final_value": None, "fallback_policy": "MISSING_SKP_35_PERFORMANCE",
+                "fallback_rate": 35.0, "reason_code": "", "reason": "",
+                "description": "NIP tidak ditemukan pada hasil Final SKP periode",
+            }
+        return {
+            "ready": False, "source_type": "MISSING", "source_status": "SKP_NOT_FOUND",
+            "ready_mode": "BLOCKED", "final_value": None, "fallback_policy": None,
+            "fallback_rate": None, "reason_code": "SKP_NOT_FOUND",
+            "reason": "SKP belum tersedia", "description": "SKP belum tersedia",
+        }
+    status = _predicate(row.get("review_status") or row.get("status_skp")).replace(" ", "_")
+    direct = bool(direct_final_import or status == "FINAL_IMPORTED"
+                  or row.get("source_type") == "DIRECT_FINAL_IMPORT")
+    source_type = "DIRECT_FINAL_IMPORT" if direct else "INTERNAL_WORKFLOW"
+    if _predicate(row.get("validation_status") or "VALID") != "VALID":
+        source_status = "INVALID_FINAL_IMPORT" if direct else "INTERNAL_NOT_FINAL"
+        reason = "hasil import final SKP tidak valid" if direct else "data SKP internal tidak valid"
+        return {"ready": False, "source_type": source_type, "source_status": source_status,
+                "ready_mode": "BLOCKED", "final_value": None, "fallback_policy": None,
+                "fallback_rate": None,
+                "reason_code": "FINAL_IMPORT_INVALID" if direct else "SKP_INVALID",
+                "reason": reason, "description": reason}
+    predicate = _predicate(row.get("final_predicate") or row.get("predikat_skp"))
+    report_status = _predicate(row.get("report_status") or "SUBMITTED").replace(" ", "_")
+    rate = _number(row.get("final_reduction_rate") if "final_reduction_rate" in row
+                   else row.get("potongan_skp_percent"))
+    if rate is None and report_status == "SUBMITTED":
+        rate = VALID_PREDICATES.get(predicate)
+    value_valid = rate is not None and 0 <= rate <= 100 and (
+        report_status != "SUBMITTED" or predicate in VALID_PREDICATES
+    )
+    if direct:
+        if not value_valid:
+            return {"ready": False, "source_type": source_type,
+                    "source_status": "INVALID_FINAL_IMPORT", "ready_mode": "BLOCKED",
+                    "final_value": None, "fallback_policy": None, "fallback_rate": None,
+                    "reason_code": "FINAL_IMPORT_VALUE_INVALID",
+                    "reason": "hasil import final tidak memiliki nilai SKP yang valid",
+                    "description": "Hasil Import Final tersedia tetapi nilainya tidak valid"}
+        return {"ready": True, "source_type": source_type, "source_status": "FINAL_IMPORTED",
+                "ready_mode": "NORMAL", "final_value": rate, "fallback_policy": None,
+                "fallback_rate": None, "reason_code": "", "reason": "",
+                "description": "SKP final tersedia dari Import Hasil Final"}
+    if status != "APPROVED":
+        return {"ready": False, "source_type": source_type,
+                "source_status": "INTERNAL_NOT_FINAL", "ready_mode": "BLOCKED",
+                "final_value": None, "fallback_policy": None, "fallback_rate": None,
+                "reason_code": "INTERNAL_NOT_APPROVED", "reason": "SKP internal belum APPROVED",
+                "description": "Workflow SKP internal belum selesai"}
+    if not value_valid:
+        return {"ready": False, "source_type": source_type,
+                "source_status": "INTERNAL_NOT_FINAL", "ready_mode": "BLOCKED",
+                "final_value": None, "fallback_policy": None, "fallback_rate": None,
+                "reason_code": "SKP_VALUE_INVALID", "reason": "nilai final SKP internal tidak valid",
+                "description": "Nilai final SKP internal tidak valid"}
+    return {"ready": True, "source_type": source_type, "source_status": "INTERNAL_APPROVED",
+            "ready_mode": "NORMAL", "final_value": rate, "fallback_policy": None,
+            "fallback_rate": None, "reason_code": "", "reason": "",
+            "description": "SKP internal telah APPROVED"}
+
+
+def skp_ready_for_tukin(row: Mapping[str, Any], direct_final_import: bool = False) -> dict[str, Any]:
+    """Backward-compatible entry point for the canonical SKP resolver."""
+    return resolve_skp_for_tukin(row, direct_final_import, attendance_participant=False)
+
+
+def annotate_skp_tukin_provenance(conn, period: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach direct-final provenance, including compatibility for legacy imports."""
+    direct_keys: set[tuple[str, str]] = set()
+    tables = {item[0] for item in conn.execute("SHOW TABLES").fetchall()}
+    if {"skp_assessment_monthly", "skp_import_batch", "skp_assessment_audit"}.issubset(tables):
+        found = conn.execute(
+            """SELECT DISTINCT s.nip,s.import_batch_id
+               FROM skp_assessment_monthly s
+               JOIN skp_import_batch b ON b.id=s.import_batch_id
+                    AND b.assessment_period=s.assessment_period
+               WHERE s.assessment_period=?
+                 AND b.status='COMPLETED' AND coalesce(b.rejected_count,0)=0
+                 AND EXISTS (
+                    SELECT 1 FROM skp_assessment_audit a
+                    WHERE a.assessment_period=s.assessment_period AND a.nip=s.nip
+                      AND a.action='IMPORT_FINAL'
+                      AND coalesce(a.evidence_ref,'')=coalesce(s.source_file,'')
+                 )""", [period],
+        ).fetchall()
+        direct_keys = {(str(nip), str(batch_id or "")) for nip, batch_id in found}
+    annotated = []
+    for original in rows:
+        row = dict(original)
+        key = (str(row.get("nip") or ""), str(row.get("import_batch_id") or ""))
+        row["_direct_final_import"] = (
+            _predicate(row.get("review_status")).replace(" ", "_") == "FINAL_IMPORTED"
+            or key in direct_keys
+        )
+        row["skp_source_type"] = "DIRECT_FINAL_IMPORT" if row["_direct_final_import"] else "INTERNAL_WORKFLOW"
+        annotated.append(row)
+    return annotated
+
+
+def _report_status(predicate: str, value: Any) -> str:
+    """Backward-compatible private alias for the canonical classifier."""
+    return classify_skp_report_status(predicate, value)
+
+
 class SkpAssessmentService:
     def __init__(self, db_path: str):
         self.db_path = str(db_path)
@@ -184,6 +352,7 @@ class SkpAssessmentService:
                 ensure_deceased_schema(conn)
                 ensure_condition_schema(conn)
                 ensure_third_missing_unpaid(conn)
+                ensure_operational_schema(conn)
                 _READY.add(self.db_path)
         return conn
 
@@ -233,6 +402,57 @@ class SkpAssessmentService:
             code = _predicate(row.get("indicator_code"))
             result.setdefault(code, []).append(row)
         return result
+
+    def _active_assessment_rules(self, period: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            frame = conn.execute(
+                """SELECT * FROM skp_assessment_rule
+                   WHERE active=true AND effective_from<=?
+                     AND (effective_to IS NULL OR effective_to='' OR effective_to>=?)
+                   ORDER BY priority,id""", [period, period]
+            ).fetchdf()
+        return self._records(frame)
+
+    @staticmethod
+    def _rule_matches(rule: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+        field = _text(rule.get("condition_field")).lower()
+        value = row.get(field)
+        expected = _text(rule.get("threshold_value"))
+        operator = _predicate(rule.get("comparison_operator") or "EQ").replace(" ", "_")
+        if operator in {"GT", "GTE", "LT", "LTE"}:
+            left, right = _number(value), _number(expected)
+            if left is None or right is None:
+                return False
+            return {"GT": left > right, "GTE": left >= right,
+                    "LT": left < right, "LTE": left <= right}[operator]
+        left = _predicate(value)
+        if operator == "IN":
+            return left in {_predicate(part) for part in expected.split(",") if _text(part)}
+        if operator == "NE":
+            return left != _predicate(expected)
+        return left == _predicate(expected)
+
+    def _apply_assessment_rule(self, rules: list[dict[str, Any]], row: dict[str, Any]) -> None:
+        flag = _predicate(row.get("sdm_flag")).replace(" ", "_") or "NON_3T"
+        for rule in rules:
+            scope = _predicate(rule.get("flag_scope") or "ALL").replace(" ", "_")
+            if scope not in {"ALL", flag}:
+                continue
+            matched = self._rule_matches(rule, row)
+            predicate = rule.get("result_if_met") if matched else rule.get("result_if_not_met")
+            reduction = rule.get("reduction_if_met") if matched else rule.get("reduction_if_not_met")
+            normalized = _predicate(predicate)
+            if normalized not in VALID_PREDICATES:
+                continue
+            row["recommended_predicate"] = normalized.title()
+            row["recommended_reduction_rate"] = (
+                float(reduction) if reduction is not None else VALID_PREDICATES[normalized]
+            )
+            row["assessment_rule_id"] = rule.get("id")
+            row["assessment_rule_snapshot"] = json.dumps(rule, ensure_ascii=False, default=str)
+            if not row.get("recommendation_reason"):
+                row["recommendation_reason"] = f"Rekomendasi aturan: {_text(rule.get('rule_name'))}"
+            break
 
     def _approved_exceptions(self, period: str) -> dict[str, str]:
         with self.connect() as conn:
@@ -313,6 +533,7 @@ class SkpAssessmentService:
 
         master, master_available = self._master()
         configs = {} if mode == "FINAL" else self._active_indicator_configs(period)
+        assessment_rules = [] if mode == "FINAL" else self._active_assessment_rules(period)
         exceptions = self._approved_exceptions(period)
         deaths = self._death_records()
         from collections import Counter
@@ -339,6 +560,10 @@ class SkpAssessmentService:
                 row_issues.append({"severity": "ERROR", "code": "DUPLICATE_NIP", "message": "NIP duplikat dalam file"})
             elif master_available and nip not in master:
                 row_issues.append({"severity": "ERROR", "code": "NIP_NOT_IN_MASTER", "message": "NIP tidak ditemukan di Master SDM"})
+            source_period = _source_period(get("assessment_period"), period[:4])
+            if source_period and source_period != period:
+                row_issues.append({"severity": "ERROR", "code": "PERIOD_MISMATCH",
+                                   "message": f"Periode file {source_period} tidak sama dengan periode proses {period}"})
             death = deaths.get(nip)
             if death and period >= _text(death.get("stop_effective_period")):
                 row_issues.append({
@@ -374,8 +599,13 @@ class SkpAssessmentService:
                 "jabatan": _text(get("jabatan")) or _text(master_row.get("jabatan")),
                 "source_predicate": source_predicate.title() if source_predicate in VALID_PREDICATES else source_predicate,
                 "recommended_predicate": source_predicate.title() if source_predicate in VALID_PREDICATES else "",
+                "recommended_reduction_rate": VALID_PREDICATES.get(source_predicate),
                 "final_predicate": "",
+                "final_reduction_rate": None,
                 "report_status": report_status,
+                "sdm_flag": "3T" if master_row.get("wilayah_3t") is True else "NON_3T",
+                "assessment_rule_id": None,
+                "assessment_rule_snapshot": "",
                 **indicator_values,
                 "indicator_config_snapshot": json.dumps(config_snapshot, ensure_ascii=False),
                 "pokja_notes": _text(get("pokja_notes")),
@@ -386,6 +616,8 @@ class SkpAssessmentService:
                 "source_row": source_row,
                 "issues": row_issues,
             }
+            if mode == "REVIEW" and item["validation_status"] == "VALID":
+                self._apply_assessment_rule(assessment_rules, item)
             normalized.append(item)
             for issue in row_issues:
                 issues.append({"row": source_row, "nip": nip, **issue})
@@ -396,6 +628,7 @@ class SkpAssessmentService:
             "warning_count": sum(i["severity"] == "WARNING" for i in issues),
             "master_available": master_available,
             "active_config_count": sum(len(items) for items in configs.values()),
+            "active_assessment_rule_count": len(assessment_rules),
             "rows": normalized, "issues": issues[:500],
         }
 
@@ -409,6 +642,8 @@ class SkpAssessmentService:
         if final_mode and (payload.get("final_confirmed") is not True or not _text(payload.get("imported_by"))):
             raise ValueError("Impor final memerlukan nama petugas dan konfirmasi hasil final SKP")
         valid_rows = [row for row in preview["rows"] if row["validation_status"] == "VALID"]
+        if final_mode and preview["rejected_count"]:
+            raise ValueError("Impor Final SKP diblokir: perbaiki seluruh baris invalid/duplikat terlebih dahulu")
         if not valid_rows:
             raise ValueError("Tidak ada baris valid yang dapat disimpan")
         batch_id = str(uuid.uuid4())
@@ -421,6 +656,7 @@ class SkpAssessmentService:
                 # Recheck in the write transaction so a period that was locked
                 # after preview cannot be overwritten during confirmation.
                 self._ensure_period_open(period, conn)
+                conn.execute("DELETE FROM skp_period_finalization WHERE assessment_period=?", [period])
                 # Preserve every original row, including duplicate/unmatched
                 # rows excluded from assessment, for subsequent reconciliation.
                 conn.execute('''CREATE TABLE IF NOT EXISTS skp_import_source (
@@ -456,8 +692,9 @@ class SkpAssessmentService:
                             verkom_target,verkom_actual,verkom_achievement_pct,verkom_pokja_recommendation,
                             graduasi_target,graduasi_actual,graduasi_achievement_pct,graduasi_pokja_recommendation,
                             p2k2_target,p2k2_actual,p2k2_achievement_pct,p2k2_pokja_recommendation,
-                            indicator_config_snapshot,pokja_notes)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            indicator_config_snapshot,pokja_notes,sdm_flag,assessment_rule_id,
+                            assessment_rule_snapshot,recommended_reduction_rate,final_reduction_rate)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         [row["assessment_period"], row["nip"], row["sdm_id"], row["nama"], row["penilai"],
                          row["jabatan"], row["source_predicate"], row["recommended_predicate"], "",
                          row["report_status"], row["hek_status"], row["verkom_status"],
@@ -467,7 +704,10 @@ class SkpAssessmentService:
                          row["verkom_target"], row["verkom_actual"], row["verkom_achievement_pct"], row["verkom_pokja_recommendation"],
                          row["graduasi_target"], row["graduasi_actual"], row["graduasi_achievement_pct"], row["graduasi_pokja_recommendation"],
                          row["p2k2_target"], row["p2k2_actual"], row["p2k2_achievement_pct"], row["p2k2_pokja_recommendation"],
-                         row["indicator_config_snapshot"], row["pokja_notes"]],
+                         row["indicator_config_snapshot"], row["pokja_notes"], row["sdm_flag"],
+                         row["assessment_rule_id"], row["assessment_rule_snapshot"],
+                         row["recommended_reduction_rate"],
+                         row["recommended_reduction_rate"] if final_mode else None],
                     )
                     self._audit(conn, row["assessment_period"], row["nip"], "IMPORT",
                                 json.dumps(previous, default=str) if previous else "",
@@ -476,10 +716,11 @@ class SkpAssessmentService:
                         final = _predicate(row["source_predicate"])
                         label = final.title() if final in VALID_PREDICATES else ""
                         conn.execute("""UPDATE skp_assessment_monthly SET final_predicate=?,
-                            review_status='APPROVED',approved_by=?,approved_at=now(),updated_at=now()
+                            review_status='FINAL_IMPORTED',reviewed_by=?,reviewed_at=now(),
+                            approved_by=NULL,approved_at=NULL,updated_at=now()
                             WHERE assessment_period=? AND nip=?""", [label, actor, period, row["nip"]])
                         self._audit(conn, period, row["nip"], "IMPORT_FINAL", "PENDING_REVIEW",
-                                    "APPROVED", "Petugas mengonfirmasi sumber sebagai hasil final SKP", filename, actor)
+                                    "FINAL_IMPORTED", "Petugas mengonfirmasi sumber sebagai hasil final SKP", filename, actor)
                         approved_rows.append({"assessment_period": period, "nip": row["nip"],
                             "nama": row["nama"], "penilai": row["penilai"], "jabatan": row["jabatan"],
                             "tahap": "", "predicate_raw": row["source_predicate"], "predicate_normalized": label,
@@ -487,7 +728,7 @@ class SkpAssessmentService:
                             "skp_reduction_rate": VALID_PREDICATES.get(final, 0), "payment_eligible": True,
                             "exception_code": None, "source_file": filename, "source_row": row["source_row"],
                             "import_batch_id": batch_id})
-                        row["review_status"] = "APPROVED"
+                        row["review_status"] = "FINAL_IMPORTED"
                         row["final_predicate"] = label
                 conn.execute(
                     """INSERT INTO skp_import_batch
@@ -504,7 +745,10 @@ class SkpAssessmentService:
             self._sync_approved(period, approved_rows)
         else:
             self._sync_pending(preview["assessment_period"], valid_rows)
-        return {**preview, "rows": preview["rows"][:100], "batch_id": batch_id, "imported": len(valid_rows)}
+        return {**preview, "rows": preview["rows"][:100], "batch_id": batch_id,
+                "imported": len(valid_rows),
+                "source_type": "DIRECT_FINAL_IMPORT" if final_mode else "INTERNAL_WORKFLOW",
+                "ready_for_tukin": bool(final_mode)}
 
     def list_import_batches(self, period: str) -> dict:
         period = _period(period)
@@ -622,7 +866,11 @@ class SkpAssessmentService:
             clauses.append("(nip ILIKE '%' || ? || '%' OR nama ILIKE '%' || ? || '%')")
             params.extend([q, q])
         if review_status:
-            clauses.append("review_status=?"); params.append(_predicate(review_status).replace(" ", "_"))
+            normalized_review = _predicate(review_status).replace(" ", "_")
+            if normalized_review == "NEEDS_REVIEW":
+                clauses.append("review_status NOT IN ('APPROVED','FINAL_IMPORTED')")
+            else:
+                clauses.append("review_status=?"); params.append(normalized_review)
         indicator = _text(indicator).lower()
         if indicator in {"hek", "verkom", "graduasi", "p2k2"} and indicator_status:
             clauses.append(f"{indicator}_status=?"); params.append(_indicator(indicator_status))
@@ -637,7 +885,8 @@ class SkpAssessmentService:
             stats = conn.execute(
                 """SELECT count(*) total,
                           count(*) FILTER (WHERE review_status='APPROVED') approved,
-                          count(*) FILTER (WHERE review_status<>'APPROVED') pending,
+                          count(*) FILTER (WHERE review_status='FINAL_IMPORTED') final_imported,
+                          count(*) FILTER (WHERE review_status NOT IN ('APPROVED','FINAL_IMPORTED')) pending,
                           count(*) FILTER (WHERE report_status='NOT_SUBMITTED_VERIFIED') not_submitted,
                           count(*) FILTER (WHERE coalesce(nullif(final_predicate,''),nullif(recommended_predicate,''),source_predicate) IN ('Kurang','Sangat Kurang')) low_predicate
                    FROM skp_assessment_monthly WHERE assessment_period=?""", [period]
@@ -645,7 +894,7 @@ class SkpAssessmentService:
         return {
             "status": "ok", "assessment_period": period, "total": int(total),
             "page": page, "pages": max(1, math.ceil(total / per_page)),
-            "summary": dict(zip(["total", "approved", "pending", "not_submitted", "low_predicate"], map(int, stats))),
+            "summary": dict(zip(["total", "approved", "final_imported", "pending", "not_submitted", "low_predicate"], map(int, stats))),
             "rows": self._records(frame),
         }
 
@@ -662,6 +911,146 @@ class SkpAssessmentService:
                 params,
             ).fetchdf()
         return {"status": "ok", "period": period, "rows": self._records(frame)}
+
+    def list_assessment_rules(self, period: str = "") -> dict[str, Any]:
+        params: list[Any] = []
+        where = "1=1"
+        if period:
+            period = _period(period)
+            where += " AND effective_from<=? AND (effective_to IS NULL OR effective_to='' OR effective_to>=?)"
+            params = [period, period]
+        with self.connect() as conn:
+            frame = conn.execute(
+                f"SELECT * FROM skp_assessment_rule WHERE {where} ORDER BY priority,rule_name", params
+            ).fetchdf()
+        return {"status": "ok", "period": period, "rows": self._records(frame)}
+
+    def save_assessment_rule(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        rule_id = _text(payload.get("id")) or str(uuid.uuid4())
+        name = _text(payload.get("rule_name"))
+        actor = _text(payload.get("updated_by") or payload.get("created_by")) or "EVKIN"
+        flag = _predicate(payload.get("flag_scope") or "ALL").replace(" ", "_")
+        field = _text(payload.get("condition_field")).lower()
+        operator = _predicate(payload.get("comparison_operator") or "EQ").replace(" ", "_")
+        effective_from = _period(payload.get("effective_from"))
+        effective_to = _text(payload.get("effective_to"))
+        if effective_to:
+            effective_to = _period(effective_to)
+            if effective_to < effective_from:
+                raise ValueError("Periode akhir aturan tidak boleh sebelum periode mulai")
+        if not name:
+            raise ValueError("Nama aturan wajib diisi")
+        if flag not in {"3T", "NON_3T", "ALL"}:
+            raise ValueError("Flag aturan harus 3T, NON_3T, atau ALL")
+        allowed_fields = {
+            "hek_status", "verkom_status", "graduasi_status", "p2k2_status",
+            "hek_achievement_pct", "verkom_achievement_pct", "graduasi_achievement_pct",
+            "p2k2_achievement_pct", "report_status", "source_predicate",
+        }
+        if field not in allowed_fields or operator not in {"EQ", "NE", "IN", "GT", "GTE", "LT", "LTE"}:
+            raise ValueError("Kondisi/operator aturan tidak valid")
+        met = _predicate(payload.get("result_if_met"))
+        not_met = _predicate(payload.get("result_if_not_met"))
+        if met not in VALID_PREDICATES or (not_met and not_met not in VALID_PREDICATES):
+            raise ValueError("Hasil aturan harus menggunakan predikat SKP yang valid")
+        reductions = []
+        for key in ("reduction_if_met", "reduction_if_not_met"):
+            value = _number(payload.get(key))
+            if value is not None and not 0 <= value <= 100:
+                raise ValueError("Potongan aturan harus antara 0 dan 100 persen")
+            reductions.append(value)
+        new_value = {
+            "id": rule_id, "rule_name": name, "priority": int(payload.get("priority") or 100),
+            "flag_scope": flag, "condition_field": field, "comparison_operator": operator,
+            "threshold_value": _text(payload.get("threshold_value")),
+            "result_if_met": met.title(), "reduction_if_met": reductions[0],
+            "result_if_not_met": not_met.title() if not_met else None,
+            "reduction_if_not_met": reductions[1], "active": payload.get("active") is not False,
+            "effective_from": effective_from, "effective_to": effective_to or None,
+            "created_by": actor,
+        }
+        with self.connect() as conn:
+            old_frame = conn.execute("SELECT * FROM skp_assessment_rule WHERE id=?", [rule_id]).fetchdf()
+            old = self._records(old_frame)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute("DELETE FROM skp_assessment_rule WHERE id=?", [rule_id])
+                conn.execute(
+                    """INSERT INTO skp_assessment_rule
+                       (id,rule_name,priority,flag_scope,condition_field,comparison_operator,
+                        threshold_value,result_if_met,reduction_if_met,result_if_not_met,
+                        reduction_if_not_met,active,effective_from,effective_to,created_by)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", list(new_value.values())
+                )
+                conn.execute(
+                    "INSERT INTO skp_assessment_rule_audit(id,rule_id,action,old_value,new_value,actor) VALUES (?,?,?,?,?,?)",
+                    [str(uuid.uuid4()), rule_id, "UPDATE" if old else "CREATE",
+                     json.dumps(old[0], default=str) if old else "",
+                     json.dumps(new_value, ensure_ascii=False, default=str), actor],
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {"status": "ok", "rule": new_value}
+
+    def non_submission_rules(self, period: str = "") -> dict[str, Any]:
+        period = _period(period) if period else ""
+        where, params = "1=1", []
+        if period:
+            where += " AND effective_from<=? AND (effective_to IS NULL OR effective_to='' OR effective_to>=?)"
+            params = [period, period]
+        with self.connect() as conn:
+            frame = conn.execute(
+                f"SELECT * FROM skp_non_submission_rule WHERE {where} ORDER BY streak_from", params
+            ).fetchdf()
+        return {"status": "ok", "period": period, "rows": self._records(frame)}
+
+    def save_non_submission_rules(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        rules = payload.get("rules") or []
+        actor = _text(payload.get("updated_by")) or "EVKIN"
+        if not isinstance(rules, list) or not rules:
+            raise ValueError("Minimal satu aturan tidak mengerjakan SKP wajib diisi")
+        prepared = []
+        for item in rules:
+            start = int(item.get("streak_from") or 0)
+            end = int(item["streak_to"]) if item.get("streak_to") not in (None, "") else None
+            action = _predicate(item.get("action") or "PERCENT")
+            rate = _number(item.get("reduction_rate"))
+            effective_from = _period(item.get("effective_from"))
+            effective_to = _text(item.get("effective_to"))
+            if start < 1 or (end is not None and end < start) or action not in {"PERCENT", "UNPAID"}:
+                raise ValueError("Rentang/aksi aturan tidak mengerjakan SKP tidak valid")
+            if rate is None or not 0 <= rate <= 100:
+                raise ValueError("Potongan tidak mengerjakan SKP harus 0–100 persen")
+            prepared.append([_text(item.get("id")) or str(uuid.uuid4()), start, end, action,
+                             rate, item.get("active") is not False, effective_from,
+                             _period(effective_to) if effective_to else None, actor])
+        with self.connect() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for item in prepared:
+                    old = conn.execute("SELECT * FROM skp_non_submission_rule WHERE id=?", [item[0]]).fetchone()
+                    conn.execute("DELETE FROM skp_non_submission_rule WHERE id=?", [item[0]])
+                    conn.execute(
+                        """INSERT INTO skp_non_submission_rule
+                           (id,streak_from,streak_to,action,reduction_rate,active,effective_from,effective_to,updated_by)
+                           VALUES (?,?,?,?,?,?,?,?,?)""", item
+                    )
+                    conn.execute(
+                        "INSERT INTO skp_assessment_rule_audit(id,rule_id,action,old_value,new_value,actor) VALUES (?,?,?,?,?,?)",
+                        [str(uuid.uuid4()), item[0], "NON_SUBMISSION_UPDATE",
+                         json.dumps(old, default=str) if old else "", json.dumps(item, default=str), actor],
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        years = {int(item[6][:4]) for item in prepared}
+        annual = importlib.import_module("backend.tukin_annual").TukinAnnualService(self.db_path)
+        for year in years:
+            annual.recompute_skp_streaks(year)
+        return self.non_submission_rules()
 
     def delete_indicator_config(self, config_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         actor = _text(payload.get('actor'))
@@ -924,6 +1313,8 @@ class SkpAssessmentService:
         with self.connect() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
+                if skp_effect == "RECOMMEND_PREDICATE":
+                    conn.execute("DELETE FROM skp_period_finalization WHERE assessment_period=?", [period])
                 for nip in nips:
                     assessment = conn.execute(
                         "SELECT recommended_predicate,review_status FROM skp_assessment_monthly WHERE assessment_period=? AND nip=?",
@@ -966,11 +1357,12 @@ class SkpAssessmentService:
                     if skp_effect == "RECOMMEND_PREDICATE":
                         conn.execute(
                             """UPDATE skp_assessment_monthly SET recommended_predicate=?,
+                               recommended_reduction_rate=?,
                                recommendation_reason=?,evidence_ref=?,review_status='RECOMMENDED',
                                reviewed_by=?,reviewed_at=now(),final_predicate=NULL,
                                approved_by=NULL,approved_at=NULL,updated_at=now()
                                WHERE assessment_period=? AND nip=?""",
-                            [recommended.title(), reason, evidence, actor, period, nip],
+                            [recommended.title(), VALID_PREDICATES[recommended], reason, evidence, actor, period, nip],
                         )
                         self._audit(conn, period, nip, "CONDITION_RECOMMENDATION",
                                     _text(assessment[0]), recommended.title(), reason, evidence, actor)
@@ -1029,6 +1421,7 @@ class SkpAssessmentService:
         with self.connect() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
+                conn.execute("DELETE FROM skp_period_finalization WHERE assessment_period=?", [period])
                 conn.execute(
                     """INSERT INTO skp_meeting_batch
                        (id,batch_code,assessment_period,meeting_date,document_number,recommended_predicate,
@@ -1046,11 +1439,11 @@ class SkpAssessmentService:
                     ).fetchone()
                     if not current:
                         continue
-                    sets = ["recommended_predicate=?", "recommendation_reason=?", "reviewer_notes=?",
+                    sets = ["recommended_predicate=?", "recommended_reduction_rate=?", "recommendation_reason=?", "reviewer_notes=?",
                             "evidence_ref=?", "review_status='RECOMMENDED'", "reviewed_by=?",
                             "reviewed_at=now()", "final_predicate=NULL", "approved_by=NULL",
                             "approved_at=NULL", "meeting_batch_id=?", "updated_at=now()"]
-                    values: list[Any] = [predicate.title(), reason, notes, evidence, actor, meeting_id]
+                    values: list[Any] = [predicate.title(), VALID_PREDICATES[predicate], reason, notes, evidence, actor, meeting_id]
                     for field, value in indicators.items():
                         sets.append(f"{field}=?"); values.append(value)
                     conn.execute(
@@ -1087,10 +1480,12 @@ class SkpAssessmentService:
         with self.connect() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
+                conn.execute("DELETE FROM skp_period_finalization WHERE assessment_period=?", [period])
                 for nip in nips:
                     row = conn.execute(
                         """SELECT nama,penilai,jabatan,source_predicate,recommended_predicate,
-                                  report_status,source_file,source_row,import_batch_id,review_status
+                                  report_status,source_file,source_row,import_batch_id,review_status,
+                                  recommended_reduction_rate,final_reduction_rate
                            FROM skp_assessment_monthly WHERE assessment_period=? AND nip=?""",
                         [period, nip],
                     ).fetchone()
@@ -1110,22 +1505,39 @@ class SkpAssessmentService:
                     final_predicate = _predicate(payload.get("final_predicate") or row[4] or row[3])
                     if report_status == "SUBMITTED" and final_predicate not in VALID_PREDICATES:
                         raise ValueError(f"Predikat final NIP {nip} belum valid")
+                    base_predicate = _predicate(row[4] or row[3])
+                    requested_rate = _number(payload.get("final_reduction_rate"))
+                    final_rate = requested_rate if requested_rate is not None else (
+                        float(row[10]) if row[10] is not None else VALID_PREDICATES.get(final_predicate, 0)
+                    )
+                    manual_override = final_predicate != base_predicate or (
+                        requested_rate is not None and row[10] is not None
+                        and float(requested_rate) != float(row[10])
+                    )
+                    if manual_override and not notes:
+                        raise ValueError("Alasan manual override wajib diisi")
                     conn.execute(
                         """UPDATE skp_assessment_monthly SET final_predicate=?,review_status='APPROVED',
+                           final_reduction_rate=?,manual_override_reason=?,manual_override_by=?,
+                           manual_override_at=CASE WHEN ? THEN now() ELSE NULL END,
                            reviewer_notes=CASE WHEN ?<>'' THEN ? ELSE reviewer_notes END,
                            approved_by=?,approved_at=now(),updated_at=now()
                            WHERE assessment_period=? AND nip=?""",
-                        [final_predicate.title() if final_predicate in VALID_PREDICATES else "", notes, notes, actor, period, nip],
+                        [final_predicate.title() if final_predicate in VALID_PREDICATES else "", final_rate,
+                         notes if manual_override else None, actor if manual_override else None, manual_override,
+                         notes, notes, actor, period, nip],
                     )
-                    self._audit(conn, period, nip, "APPROVE", _text(row[4]),
-                                final_predicate.title(), notes, "", actor)
+                    before = json.dumps({"predicate": _text(row[4] or row[3]), "reduction_rate": row[10]}, default=str)
+                    after = json.dumps({"predicate": final_predicate.title(), "reduction_rate": final_rate}, default=str)
+                    self._audit(conn, period, nip, "MANUAL_OVERRIDE" if manual_override else "APPROVE",
+                                before, after, notes, "", actor)
                     approved_rows.append({
                         "assessment_period": period, "nip": nip, "nama": _text(row[0]),
                         "penilai": _text(row[1]), "jabatan": _text(row[2]), "tahap": "",
                         "predicate_raw": _text(row[3]),
                         "predicate_normalized": final_predicate.title() if final_predicate in VALID_PREDICATES else "",
                         "report_status": report_status, "consecutive_missing": 0,
-                        "skp_reduction_rate": VALID_PREDICATES.get(final_predicate, 0),
+                        "skp_reduction_rate": final_rate,
                         "payment_eligible": True, "exception_code": None,
                         "source_file": _text(row[6]), "source_row": row[7], "import_batch_id": _text(row[8]),
                     })
@@ -1164,6 +1576,77 @@ class SkpAssessmentService:
                     row = None
         if row and _predicate(row[0]).replace(" ", "_") in {"LOCKED", "PAID", "HISTORICAL_LOCKED"}:
             raise ValueError("Periode Tukin sudah dikunci/dibayar dan tidak dapat mengubah penilaian SKP")
+
+    def period_summary(self, period: str) -> dict[str, Any]:
+        period = _period(period)
+        with self.connect() as conn:
+            stats = conn.execute(
+                """SELECT count(*) total_sdm,
+                          count(*) FILTER (WHERE review_status IN ('APPROVED','FINAL_IMPORTED')) final_count,
+                          count(*) FILTER (WHERE review_status='APPROVED') internal_approved_count,
+                          count(*) FILTER (WHERE review_status='FINAL_IMPORTED') direct_final_count,
+                          count(*) FILTER (WHERE review_status NOT IN ('APPROVED','FINAL_IMPORTED')) review_count,
+                          count(*) FILTER (WHERE validation_status<>'VALID' OR report_status IN ('DATA_MISSING','INVALID_PREDICATE')) incomplete_count,
+                          count(*) FILTER (WHERE report_status='NOT_SUBMITTED_VERIFIED') not_submitted_count
+                   FROM skp_assessment_monthly WHERE assessment_period=?""", [period]
+            ).fetchone()
+            hukdis = conn.execute(
+                """SELECT count(*) FROM skp_condition_decision
+                   WHERE assessment_period=? AND status='APPROVED' AND condition_code='HUKDIS'""", [period]
+            ).fetchone()[0]
+            row = conn.execute(
+                "SELECT status,finalized_by,finalized_at FROM skp_period_finalization WHERE assessment_period=?",
+                [period],
+            ).fetchone()
+            latest_rejected = conn.execute(
+                """SELECT coalesce(rejected_count,0) FROM skp_import_batch
+                   WHERE assessment_period=? AND status='COMPLETED' ORDER BY created_at DESC LIMIT 1""",
+                [period],
+            ).fetchone()
+        keys = ["total_sdm", "final_count", "internal_approved_count", "direct_final_count",
+                "review_count", "incomplete_count", "not_submitted_count"]
+        summary = dict(zip(keys, map(int, stats)))
+        summary["incomplete_count"] += int(latest_rejected[0]) if latest_rejected else 0
+        summary["hukdis_count"] = int(hukdis)
+        summary["ready_to_finalize"] = bool(summary["total_sdm"] and not summary["review_count"] and not summary["incomplete_count"])
+        summary["requires_internal_finalization"] = bool(summary["internal_approved_count"])
+        summary["status"] = row[0] if row else (
+            "FINAL_IMPORTED" if summary["ready_to_finalize"] and summary["direct_final_count"] == summary["total_sdm"]
+            else "READY" if summary["ready_to_finalize"] else "IN_PROGRESS"
+        )
+        summary["finalized_by"] = row[1] if row else None
+        summary["finalized_at"] = str(row[2]) if row and row[2] else None
+        return {"status": "ok", "assessment_period": period, "summary": summary}
+
+    def finalize_period(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        period = _period(payload.get("assessment_period"))
+        actor = _text(payload.get("finalized_by"))
+        reason = _text(payload.get("reason"))
+        if not actor or not reason:
+            raise ValueError("Petugas dan alasan Final SKP wajib diisi")
+        self._ensure_period_open(period)
+        current = self.period_summary(period)
+        summary = current["summary"]
+        if not summary["ready_to_finalize"]:
+            raise ValueError(
+                f"Final SKP diblokir: {summary['review_count']} perlu verifikasi dan "
+                f"{summary['incomplete_count']} data tidak lengkap"
+            )
+        snapshot = json.dumps({**summary, "reason": reason}, ensure_ascii=False, default=str)
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO skp_period_finalization
+                   (assessment_period,status,total_sdm,approved_count,incomplete_count,
+                    summary_snapshot,finalized_by,finalized_at)
+                   VALUES (?,'FINAL',?,?,?,?,?,now())
+                   ON CONFLICT (assessment_period) DO UPDATE SET status='FINAL',
+                    total_sdm=excluded.total_sdm,approved_count=excluded.approved_count,
+                    incomplete_count=excluded.incomplete_count,summary_snapshot=excluded.summary_snapshot,
+                    finalized_by=excluded.finalized_by,finalized_at=now()""",
+                [period, summary["total_sdm"], summary["final_count"], summary["incomplete_count"], snapshot, actor],
+            )
+            self._audit(conn, period, "", "FINALIZE_PERIOD", "", "FINAL", reason, "", actor)
+        return self.period_summary(period)
 
     def annual(self, year: int, q: str = "") -> dict[str, Any]:
         with self.connect() as conn:
@@ -1429,6 +1912,26 @@ def create_router(db_path_getter: Callable[[], str]) -> APIRouter:
         try: return service().save_indicator_config(payload)
         except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.get("/rules")
+    def assessment_rules(period: str = ""):
+        try: return service().list_assessment_rules(period)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/rules")
+    def save_assessment_rule(payload: dict[str, Any]):
+        try: return service().save_assessment_rule(payload)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/non-submission-rules")
+    def non_submission_rules(period: str = ""):
+        try: return service().non_submission_rules(period)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/non-submission-rules")
+    def save_non_submission_rules(payload: dict[str, Any]):
+        try: return service().save_non_submission_rules(payload)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @router.delete('/indicator-config/{config_id}')
     def delete_indicator_config(config_id: str, payload: dict[str, Any]):
         try: return service().delete_indicator_config(config_id, payload)
@@ -1457,6 +1960,16 @@ def create_router(db_path_getter: Callable[[], str]) -> APIRouter:
     @router.post("/review")
     def review(payload: dict[str, Any]):
         try: return service().review(payload)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/summary")
+    def summary(assessment_period: str):
+        try: return service().period_summary(assessment_period)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/finalize")
+    def finalize(payload: dict[str, Any]):
+        try: return service().finalize_period(payload)
         except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/annual")

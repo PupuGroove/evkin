@@ -1,13 +1,13 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 async function main(){
-  const E={};let syncs=0;
+  const E={};let syncs=0,marks=0;
   const box={window:{EVKIN:E},console,Date,Math,URL,setTimeout,clearTimeout,TextDecoder,
     FileReader:class {readAsArrayBuffer(blob){blob.arrayBuffer().then(result=>this.onload({target:{result}}));}}};
   for(const name of ['utils','data','state','import','import-wali','calc','config','harian','rekap','semifinal'])
     vm.runInNewContext(fs.readFileSync(`assets/js/${name}.js`,'utf8'),box);
   E.syncBackendWorkflow=async()=>{syncs++;};E.auditMod={logStage(){},logDataImport(){}};
   E.lookupWorkflowMaster=async()=>new Map();
-  E.exportBackend={enabled:true};
+  E.exportBackend={enabled:true,markSemifinalVerified:async()=>{marks++;}};
   const headers=['NIP','Nama','Tanggal','Jam Masuk','Jam Pulang'];
   const rows=Array.from({length:35001},(_,i)=>{
     const day=i%21+1, month=day<=11?'08':'09';
@@ -35,8 +35,11 @@ async function main(){
   }};
   E.toast=()=>{};E.go=()=>{};
   E.semifinalMod.render(el);
+  const syncBeforeVerify=syncs;
   await nodes.get('#verify').onclick();
   assert.equal(E.state.semifinal.length,35001);
+  assert.equal(syncs,syncBeforeVerify,'Verification without edits must not resend the full workflow');
+  assert.equal(marks,1,'Verification must use the lightweight backend marker');
   E.rekapMod.render(el);
   assert.ok(el.innerHTML.includes('Direkap: <b>35001</b>'));
   assert.ok(el.innerHTML.includes('rekapMonthFilter'));

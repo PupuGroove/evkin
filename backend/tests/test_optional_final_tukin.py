@@ -39,8 +39,11 @@ def test_case3_optional_missing_skp():
 
 def test_case4_required_missing_skp():
     row=calc('ABSENSI_SKP')
-    assert row['status']=='HOLD' and row['reason']=='SKP_NOT_FOUND'
-    assert row['tukin_dibayar'] is None
+    assert row['status']=='READY' and row['reason']==''
+    assert row['skp_source_status']=='MISSING_FROM_FINAL_IMPORT'
+    assert row['skp_calculation_mode']=='FALLBACK'
+    assert row['potongan_skp_percent']=='35.0'
+    assert row['potongan_skp_rp']==959408
 
 def test_case5_duplicate_skp():
     row=calc('ABSENSI_SKP',{**skp(),'_duplicate':True})
@@ -244,12 +247,9 @@ def test_export_reconciles_and_preserves_nip(service):
     assert isinstance(r['potongan_absen_percent'],(int,float))
     assert r['tukin_bruto']==r['potongan_absen_rp']+r['tukin_dibayar']
 
-def test_api_preview_import_finalize_restore(service):
+def test_api_legacy_preview_requires_canonical_snapshot(service):
     app=FastAPI();app.include_router(create_router(lambda:service.db_path));client=TestClient(app)
-    p=client.post('/api/final-tukin/preview',json={'periode':PERIOD}).json()
-    response=client.post('/api/final-tukin/finalize',json=dict(periode=PERIOD,mode='ABSENSI_ONLY',preview_signature=p['preview_signature']))
-    assert response.status_code==200,response.text
-    bid=response.json()['calculation_batch_id']
-    assert client.get('/api/final-tukin/results/'+bid).json()['rows'][0]['status']=='FINALIZED'
-    assert client.get('/api/final-tukin/export/'+bid).status_code==200
-    assert client.post('/api/final-tukin/archive/'+bid,json={}).status_code==400
+    response=client.post('/api/final-tukin/preview',json={'periode':PERIOD})
+    assert response.status_code==400
+    assert 'calculation snapshot canonical' in response.json()['detail']
+    assert client.get('/api/final-tukin/batches').json()['rows']==[]

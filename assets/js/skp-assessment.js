@@ -4,7 +4,7 @@
   const U = EVKIN.util;
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
   const view = {
-    tab: 'import', period: '', year: 2026, workbook: null, file: null,
+    tab: 'overview', period: '', year: 2026, workbook: null, file: null,
     preview: null, rows: [], selected: new Set(), page: 1, pages: 1
   };
 
@@ -21,7 +21,7 @@
   function showError(error) { EVKIN.toast(error && error.message ? error.message : String(error), 'error'); }
   function pill(value) {
     const raw = String(value || 'BELUM ADA').toUpperCase();
-    const color = /APPROVED|MENCAPAI|VALID$/.test(raw) ? 'green'
+    const color = /APPROVED|FINAL_IMPORTED|MENCAPAI|VALID$/.test(raw) ? 'green'
       : /INVALID|RETURN|SANGAT KURANG|TIDAK_ADA/.test(raw) ? 'red'
         : /PENDING|RECOMMENDED|KURANG|REVIEW/.test(raw) ? 'yellow' : 'gray';
     return `<span class="pill ${color}">${esc(raw.replaceAll('_', ' '))}</span>`;
@@ -88,12 +88,12 @@
         <div><h2>Penilaian SKP</h2><p class="muted">Validasi sumber, klasifikasi indikator, dokumentasi keputusan, dan persetujuan sebelum potongan masuk ke Tukin.</p></div>
         <div><div class="actions-row"><button id="skpDownloadApproved" class="btn btn-secondary"><i data-lucide="badge-check"></i> Download Hasil APPROVED</button><div class="skp-export-picker"><button id="skpExportToggle" type="button" class="btn btn-secondary skp-export-toggle" aria-expanded="false"><i data-lucide="list-checks"></i><span id="skpExportSheetLabel">Sheet ekspor: 2 dipilih</span><i data-lucide="chevron-down"></i></button><div id="skpExportOptions" class="card skp-export-options hidden"><div class="skp-export-options-head"><strong>Isi file Excel yang diunduh</strong><span>Centang satu atau beberapa sheet.</span></div><div class="skp-export-quick"><button id="skpExportAll" type="button">Pilih semua</button><button id="skpExportDefault" type="button">Pilihan standar</button></div>${EXPORT_SHEETS.map((item, index) => `<label><input class="skp-export-sheet" type="checkbox" value="${item[0]}" ${index < 2 ? 'checked' : ''}><span><b>${item[1]}</b><small>${item[2]}</small></span></label>`).join('')}</div></div><button id="skpDownload" class="btn btn-success"><i data-lucide="file-spreadsheet"></i> Proses & Download ${view.year}</button></div><div id="skpExportStatus" class="muted"></div></div>
       </div>
-      <div class="alert info"><i data-lucide="shield-check"></i><span>Nilai yang belum valid atau belum disetujui akan menahan pembayaran pada status <b>HOLD</b>. Hanya hasil berstatus <b>APPROVED</b> yang dikirim ke Pengelolaan Tukin.</span></div>
+      <div class="alert info"><i data-lucide="shield-check"></i><span>SKP internal wajib berstatus <b>APPROVED</b>. Data dari <b>Import Hasil Final</b> yang tervalidasi berstatus <b>FINAL_IMPORTED</b> dan dapat langsung dipakai Pengelolaan Tukin tanpa approval ulang.</span></div>
       <div class="skp-tabs" role="tablist">
-        ${[['import','Impor & Validasi'],['configuration','Konfigurasi Indikator'],['classification','Klasifikasi & Keputusan'],['review','Review & Persetujuan'],['exceptions','Kondisi & Pengecualian'],['annual','Rekap & Histori']].map(tab => `<button class="skp-tab ${view.tab === tab[0] ? 'active' : ''}" data-tab="${tab[0]}">${tab[1]}</button>`).join('')}
+        ${[['overview','Status Proses'],['import','Import SKP'],['review','Data Perlu Verifikasi'],['exceptions','Kondisi Khusus'],['annual','Final SKP']].map(tab => `<button class="skp-tab ${view.tab === tab[0] ? 'active' : ''}" data-tab="${tab[0]}">${tab[1]}</button>`).join('')}
       </div>
       <div id="skpPanel"></div>`;
-    root.querySelector('.module-head .actions-row').insertAdjacentHTML('afterbegin', '<button id="skpResetAll" class="btn btn-danger"><i data-lucide="trash-2"></i> Hapus Data Penilaian SKP</button>');
+    if (view.tab === 'configuration') root.querySelector('.module-head .actions-row').insertAdjacentHTML('afterbegin', '<button id="skpResetAll" class="btn btn-danger"><i data-lucide="trash-2"></i> Hapus Data Penilaian SKP</button>');
     if (window.lucide) lucide.createIcons();
     root.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => {
       view.tab = button.dataset.tab; view.selected.clear(); shell(root); bindShell(root); renderTab(root).catch(showError);
@@ -120,7 +120,8 @@
       download(`/api/skp-assessment/export/annual?year=${view.year}&scope=approved`, `HASIL_SKP_APPROVED_${view.year}.xlsx`);
       EVKIN.toast('Unduhan hanya berisi penilaian berstatus APPROVED.', 'success');
     };
-    root.querySelector('#skpResetAll').onclick = async () => {
+    const resetButton = root.querySelector('#skpResetAll');
+    if (resetButton) resetButton.onclick = async () => {
       try {
         await EVKIN.resetModuleData('skp', 'Penilaian SKP', ['final_skp'], async () => {
           view.selected.clear(); view.rows = []; shell(root); bindShell(root); await renderTab(root);
@@ -128,6 +129,30 @@
       } catch (error) { showError(error); }
     };
     updateExportSelection(root);
+  }
+
+  async function overviewPanel(root) {
+    root.querySelector('#skpPanel').innerHTML = `<section class="card"><div class="ta-section-head"><div><h3>Status Proses SKP</h3><p class="muted">Pilih periode, perbaiki data yang perlu verifikasi, lalu Finalisasi SKP.</p></div><input id="skpSummaryPeriod" type="month" value="${esc(view.period)}"></div><div id="skpSummary">Memuat ringkasan…</div><div class="actions-row"><button class="btn btn-primary" data-skp-open="import">Import SKP</button><button class="btn btn-secondary" data-skp-open="review">Data Perlu Verifikasi</button><button class="btn btn-secondary" data-skp-open="exceptions">Kondisi Khusus</button></div></section>`;
+    async function load() {
+      view.period = root.querySelector('#skpSummaryPeriod').value;
+      view.year = Number(view.period.slice(0,4));
+      const data = await api(`/api/skp-assessment/summary?assessment_period=${encodeURIComponent(view.period)}`);
+      const s = data.summary;
+      const cards = [['Total SDM',s.total_sdm],['Final',s.final_count],['Internal APPROVED',s.internal_approved_count],['Import Hasil Final',s.direct_final_count],['Perlu Verifikasi',s.review_count],['Data Tidak Lengkap',s.incomplete_count],['Hukdis',s.hukdis_count],['Tidak Mengerjakan SKP',s.not_submitted_count]];
+      const finalizationForm = s.requires_internal_finalization ? `<div class="form-row"><div><label>Petugas finalisasi</label><input id="skpFinalizer" value="EVKIN"></div><div class="skp-wide"><label>Alasan/dokumen finalisasi</label><input id="skpFinalizeReason" placeholder="Nomor keputusan atau catatan verifikasi"></div></div><button id="skpFinalizePeriod" class="btn btn-success" ${s.ready_to_finalize?'':'disabled'}>Finalisasi SKP</button>` : '';
+      const canContinue = s.status === 'FINAL' || s.status === 'FINAL_IMPORTED';
+      root.querySelector('#skpSummary').innerHTML = `<div class="stat-grid">${cards.map(([label,value])=>`<div class="stat-card ${value && /Verifikasi|Tidak Lengkap/.test(label)?'yellow':'blue'}"><div><div class="stat-val">${num(value)}</div><div class="stat-label">${label}</div></div></div>`).join('')}</div><div class="alert ${canContinue?'success':s.ready_to_finalize?'info':'warning'}"><span>Status: <b>${esc(s.status)}</b>${s.status==='FINAL_IMPORTED'?' · Sumber SKP: Import Hasil Final · Siap Tukin: YA':''}${s.finalized_by?` · ${esc(s.finalized_by)} · ${esc(s.finalized_at)}`:''}</span></div><div class="actions-row">${finalizationForm}${canContinue?'<button id="skpContinueTukin" class="btn btn-primary">Lanjut ke Pengelolaan Tukin</button>':''}</div>`;
+      const finalizeButton = root.querySelector('#skpFinalizePeriod'); if (finalizeButton) finalizeButton.onclick = async () => {
+        try {
+          await api('/api/skp-assessment/finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({assessment_period:view.period,finalized_by:root.querySelector('#skpFinalizer').value,reason:root.querySelector('#skpFinalizeReason').value})});
+          EVKIN.toast('Final SKP berhasil disimpan.','success'); await load();
+        } catch(error) { showError(error); }
+      };
+      const next = root.querySelector('#skpContinueTukin'); if (next) next.onclick=()=>EVKIN.go('tukin-annual');
+    }
+    root.querySelector('#skpSummaryPeriod').onchange=()=>load().catch(showError);
+    root.querySelectorAll('[data-skp-open]').forEach(button=>button.onclick=()=>{ view.tab=button.dataset.skpOpen; shell(root); bindShell(root); renderTab(root).catch(showError); });
+    await load();
   }
 
   function importPanel(root) {
@@ -215,7 +240,7 @@
       if (sourceFile !== view.file || sourceSheet !== root.querySelector('#skpSheet').value || payload.import_mode !== root.querySelector('#skpImportMode').value || payload.assessment_period !== root.querySelector('#skpPeriod').value) return;
       view.preview = { payload, result };
       renderPreview(root, view.preview.result);
-      root.querySelector('#skpCommit').disabled = !view.preview.result.valid_count;
+      root.querySelector('#skpCommit').disabled = !view.preview.result.valid_count || (payload.import_mode === 'FINAL' && view.preview.result.rejected_count > 0);
     } catch (error) { showError(error); } finally { button.disabled = false; }
   }
   function renderPreview(root, data) {
@@ -249,7 +274,11 @@
         <div class="actions-row"><button id="cfgDraft" class="btn btn-secondary">Simpan Draft</button><button id="cfgApprove" class="btn btn-primary">Simpan & Aktifkan Versi</button></div>
       </section><section class="card"><div class="ta-section-head"><div><h3>Versi Konfigurasi</h3><p class="muted">Versi aktif dipilih berdasarkan periode berlaku. Hapus menghentikan penggunaan versi pada impor berikutnya; snapshot penilaian lama dan audit tetap disimpan.</p></div><input id="cfgPeriod" type="month" value="${esc(view.period)}"></div>
         <div class="form-row"><div><label for="cfgDeleteActor">Petugas penghapusan</label><input id="cfgDeleteActor" type="text"></div><div class="skp-wide"><label for="cfgDeleteReason">Alasan penghapusan</label><input id="cfgDeleteReason" type="text" placeholder="Contoh: target salah atau versi dibuat dua kali"></div></div>
-        <p id="cfgDeleteStatus" role="status"></p><div id="cfgList"></div></section>`;
+        <p id="cfgDeleteStatus" role="status"></p><div id="cfgList"></div></section>
+      <section class="card"><div class="ta-section-head"><div><h3>Aturan Hasil Penilaian</h3><p class="muted">Rekomendasi dapat dibedakan untuk 3T, NON_3T, atau seluruh SDM. Flag berasal dari Master SDM.</p></div></div>
+        <div class="form-row"><div><label>Nama aturan</label><input id="ruleName"></div><div><label>Flag</label><select id="ruleFlag"><option>ALL</option><option>3T</option><option>NON_3T</option></select></div><div><label>Kondisi</label><select id="ruleField"><option value="hek_status">Status HEK</option><option value="verkom_status">Status Verkom</option><option value="graduasi_status">Status Graduasi</option><option value="p2k2_status">Status P2K2</option><option value="hek_achievement_pct">Capaian HEK %</option><option value="report_status">Status laporan</option></select></div><div><label>Operator</label><select id="ruleOperator"><option>EQ</option><option>NE</option><option>IN</option><option>GT</option><option>GTE</option><option>LT</option><option>LTE</option></select></div><div><label>Threshold/nilai</label><input id="ruleThreshold" placeholder="MENCAPAI atau 100"></div><div><label>Jika terpenuhi</label><select id="ruleMet">${predicateOptions()}</select></div><div><label>Potongan %</label><input id="ruleMetRate" type="number" min="0" max="100"></div><div><label>Jika tidak</label><select id="ruleNotMet"><option value="">Tidak menerapkan rule</option>${predicateOptions()}</select></div><div><label>Potongan %</label><input id="ruleNotMetRate" type="number" min="0" max="100"></div><div><label>Berlaku mulai</label><input id="ruleFrom" type="month" value="${esc(view.period)}"></div><div><label>Petugas</label><input id="ruleActor" value="EVKIN"></div></div><div class="actions-row"><button id="ruleSave" class="btn btn-primary">Simpan Aturan</button></div><div id="ruleList"></div>
+      </section>
+      <section class="card"><div class="ta-section-head"><div><h3>Aturan Tidak Mengerjakan SKP Berturut-turut</h3><p class="muted">Nilai dan aksi tiap streak disimpan sebagai konfigurasi periode.</p></div></div><div id="streakRules"></div></section>`;
     async function loadConfigs() {
       const period = root.querySelector('#cfgPeriod').value; view.period = period;
       const data = await api(`/api/skp-assessment/indicator-config?period=${encodeURIComponent(period)}`);
@@ -281,7 +310,32 @@
     root.querySelector('#cfgApprove').onclick = () => saveConfig('APPROVED').catch(showError);
     root.querySelector('#cfgPeriod').onchange = () => loadConfigs().catch(showError);
     root.querySelector('#cfgMode').onchange = event => { root.querySelector('#cfgTarget').disabled = event.target.value !== 'FIXED'; };
-    await loadConfigs();
+    async function loadOperationalRules() {
+      const [rules, streaks] = await Promise.all([api(`/api/skp-assessment/rules?period=${encodeURIComponent(view.period)}`),api(`/api/skp-assessment/non-submission-rules?period=${encodeURIComponent(view.period)}`)]);
+      root.querySelector('#ruleList').innerHTML = `<div class="table-wrap"><table class="data-table sm"><thead><tr><th>Aturan</th><th>Flag</th><th>Kondisi</th><th>Hasil</th><th>Periode</th><th>Status</th><th>Aksi</th></tr></thead><tbody>${rules.rows.map(row=>`<tr><td>${esc(row.rule_name)}</td><td>${esc(row.flag_scope)}</td><td>${esc(row.condition_field)} ${esc(row.comparison_operator)} ${esc(row.threshold_value)}</td><td>${esc(row.result_if_met)} / ${esc(row.reduction_if_met ?? 'default')}%</td><td>${esc(row.effective_from)}–${esc(row.effective_to||'seterusnya')}</td><td>${pill(row.active?'AKTIF':'NONAKTIF')}</td><td><button class="btn btn-sm btn-secondary" data-rule-toggle="${esc(row.id)}">${row.active?'Nonaktifkan':'Aktifkan'}</button></td></tr>`).join('')||'<tr><td colspan="7">Belum ada aturan hasil penilaian.</td></tr>'}</tbody></table></div>`;
+      root.querySelectorAll('[data-rule-toggle]').forEach(button=>button.onclick=async()=>{
+        try {
+          const row=rules.rows.find(item=>item.id===button.dataset.ruleToggle);
+          await api('/api/skp-assessment/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...row,active:!row.active,updated_by:root.querySelector('#ruleActor').value})});
+          EVKIN.toast(`Aturan ${row.active?'dinonaktifkan':'diaktifkan'}.`,'success'); await loadOperationalRules();
+        } catch(error) { showError(error); }
+      });
+      root.querySelector('#streakRules').innerHTML = `<div class="table-wrap"><table class="data-table sm"><thead><tr><th>Streak</th><th>Aksi</th><th>Potongan</th><th>Berlaku mulai</th></tr></thead><tbody>${streaks.rows.map(row=>`<tr><td>${esc(row.streak_from)}${row.streak_to?`–${esc(row.streak_to)}`:'+'} bulan</td><td><select data-streak-action="${esc(row.id)}"><option ${row.action==='PERCENT'?'selected':''}>PERCENT</option><option ${row.action==='UNPAID'?'selected':''}>UNPAID</option></select></td><td><input data-streak-rate="${esc(row.id)}" type="number" min="0" max="100" value="${esc(row.reduction_rate)}"></td><td><input data-streak-from="${esc(row.id)}" type="month" value="${esc(row.effective_from)}"></td></tr>`).join('')}</tbody></table></div><div class="form-row"><div><label>Petugas perubahan</label><input id="streakActor" value="EVKIN"></div><button id="streakSave" class="btn btn-primary">Simpan Aturan Streak</button></div>`;
+      root.querySelector('#streakSave').onclick = async () => {
+        try {
+          const payload = streaks.rows.map(row=>({...row,action:root.querySelector(`[data-streak-action="${row.id}"]`).value,reduction_rate:root.querySelector(`[data-streak-rate="${row.id}"]`).value,effective_from:root.querySelector(`[data-streak-from="${row.id}"]`).value}));
+          await api('/api/skp-assessment/non-submission-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rules:payload,updated_by:root.querySelector('#streakActor').value})});
+          EVKIN.toast('Aturan streak disimpan.','success'); await loadOperationalRules();
+        } catch(error) { showError(error); }
+      };
+    }
+    root.querySelector('#ruleSave').onclick = async () => {
+      try {
+        await api('/api/skp-assessment/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule_name:root.querySelector('#ruleName').value,flag_scope:root.querySelector('#ruleFlag').value,condition_field:root.querySelector('#ruleField').value,comparison_operator:root.querySelector('#ruleOperator').value,threshold_value:root.querySelector('#ruleThreshold').value,result_if_met:root.querySelector('#ruleMet').value,reduction_if_met:root.querySelector('#ruleMetRate').value,result_if_not_met:root.querySelector('#ruleNotMet').value,reduction_if_not_met:root.querySelector('#ruleNotMetRate').value,effective_from:root.querySelector('#ruleFrom').value,created_by:root.querySelector('#ruleActor').value,active:true})});
+        EVKIN.toast('Aturan penilaian disimpan.','success'); await loadOperationalRules();
+      } catch(error) { showError(error); }
+    };
+    await Promise.all([loadConfigs(),loadOperationalRules()]);
   }
   async function commitImport(root) {
     if (!view.preview) return;
@@ -291,18 +345,18 @@
       const payload = { ...view.preview.payload, confirmed: true, imported_by: root.querySelector('#skpImporter').value.trim() };
       if (payload.import_mode === 'FINAL') {
         if (!payload.imported_by) throw new Error('Nama petugas wajib diisi.');
-        if (!window.confirm(`Konfirmasi HASIL FINAL SKP periode ${payload.assessment_period}: ${view.preview.result.valid_count} baris valid langsung disetujui, ${view.preview.result.rejected_count} ditolak. Data SKP lama pada NIP yang sama akan diganti. Tanda - / tidak bisa dinilai / tidak membuat SKP mengikuti aturan potongan beruntun. Lanjutkan?`)) return;
+        if (!window.confirm(`Konfirmasi HASIL FINAL SKP periode ${payload.assessment_period}: ${view.preview.result.valid_count} baris valid disimpan sebagai hasil final tervalidasi, ${view.preview.result.rejected_count} ditolak. Data SKP lama pada NIP yang sama akan diganti. Jalur ini tidak memerlukan approval internal ulang. Tanda - / tidak bisa dinilai / tidak membuat SKP mengikuti aturan potongan beruntun. Lanjutkan?`)) return;
         payload.final_confirmed = true;
       }
       const result = await api('/api/skp-assessment/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (payload.import_mode === 'FINAL') {
         view.preview = null;
-        EVKIN.toast(`${result.imported} hasil final SKP disetujui dan dihitung.`, 'success');
+        EVKIN.toast(`${result.imported} hasil final SKP tervalidasi dan siap dikelola di Tukin.`, 'success');
         EVKIN.tukinAnnualMod.openPeriod(payload.assessment_period);
         return;
       }
       EVKIN.toast(`${result.imported} data SKP disimpan untuk direview.`, 'success');
-      view.tab = 'classification'; view.preview = null; shell(root); bindShell(root); await renderTab(root);
+      view.tab = 'review'; view.preview = null; shell(root); bindShell(root); await renderTab(root);
     } catch (error) { showError(error); } finally { if (button.isConnected) button.disabled = false; }
   }
 
@@ -314,7 +368,7 @@
         <div class="form-row skp-filter-row">
           <div><label>Periode</label><input id="skpListPeriod" type="month" value="${esc(view.period)}"></div>
           <div><label>Cari</label><input id="skpSearch" placeholder="NIP atau nama"></div>
-          <div><label>Status review</label><select id="skpReviewFilter"><option value="">Semua</option>${['PENDING_REVIEW','RECOMMENDED','RETURNED','APPROVED'].map(v => `<option>${v}</option>`).join('')}</select></div>
+          <div><label>Status review</label><select id="skpReviewFilter"><option value="NEEDS_REVIEW" ${reviewing?'selected':''}>Perlu Verifikasi</option><option value="">Semua</option>${['PENDING_REVIEW','RECOMMENDED','RETURNED','APPROVED','FINAL_IMPORTED'].map(v => `<option>${v}</option>`).join('')}</select></div>
           <div><label>Indikator</label><select id="skpIndicator"><option value="">Semua</option><option value="hek">HEK</option><option value="verkom">Verkom</option><option value="graduasi">Graduasi</option><option value="p2k2">P2K2</option></select></div>
           <div><label>Kondisi</label><select id="skpIndicatorStatus"><option value="">Semua</option>${['MENCAPAI','KURANG','TIDAK_ADA','BELUM_DINILAI'].map(v => `<option>${v}</option>`).join('')}</select></div>
           <div class="skp-filter-action"><button id="skpApplyFilter" class="btn btn-secondary">Terapkan Filter</button></div>
@@ -494,19 +548,22 @@
   }
 
   async function annualPanel(root) {
-    root.querySelector('#skpPanel').innerHTML = `<section class="card"><div class="ta-section-head"><div><h3>Rekap SKP Januari–Desember</h3><p class="muted">Matriks per SDM, ringkasan Semester I/II, dan seluruh bulan tidak membuat SKP.</p></div><div class="ta-filter"><input id="skpAnnualSearch" placeholder="Cari NIP atau nama"><select id="skpYear">${[2025,2026,2027].map(y => `<option ${y === view.year ? 'selected' : ''}>${y}</option>`).join('')}</select><button id="skpAnnualApply" class="btn btn-secondary">Terapkan</button></div></div><div id="skpAnnualMatrix"><div class="muted">Memuat rekap…</div></div></section><section class="card"><div class="ta-section-head"><div><h3>Aturan Tiga Bulan Tidak Membuat SKP</h3><p class="muted">Aturan pembayaran diterapkan otomatis dan tidak dapat diubah dari konfigurasi.</p></div></div><div class="alert warning"><i data-lucide="shield-alert"></i><span><b>Bulan pertama:</b> potongan komponen SKP 35%. <b>Bulan kedua:</b> potongan komponen SKP 70%. <b>Bulan ketiga dan seterusnya secara berturut-turut:</b> Tukin tidak dibayarkan (<b>UNPAID</b>) sampai SDM kembali membuat SKP pada bulan penilaian berikutnya.</span></div></section>`;
+    root.querySelector('#skpPanel').innerHTML = `<section class="card"><div class="ta-section-head"><div><h3>Rekap SKP Januari–Desember</h3><p class="muted">Matriks per SDM, ringkasan Semester I/II, dan seluruh bulan tidak membuat SKP.</p></div><div class="ta-filter"><input id="skpAnnualSearch" placeholder="Cari NIP atau nama"><select id="skpYear">${[2025,2026,2027].map(y => `<option ${y === view.year ? 'selected' : ''}>${y}</option>`).join('')}</select><button id="skpAnnualApply" class="btn btn-secondary">Terapkan</button></div></div><div id="skpAnnualMatrix"><div class="muted">Memuat rekap…</div></div></section><section class="card"><div class="ta-section-head"><div><h3>Aturan Tidak Mengerjakan SKP</h3><p class="muted">Aturan pembayaran mengikuti konfigurasi aktif pada periode.</p></div></div><div id="skpStreakConfig"></div></section>`;
     async function loadAnnual() {
       const year = Number(root.querySelector('#skpYear').value); view.year = year;
       const data = await api(`/api/skp-assessment/annual?year=${year}&q=${encodeURIComponent(root.querySelector('#skpAnnualSearch').value.trim())}`);
       root.querySelector('#skpAnnualMatrix').innerHTML = `<div class="table-wrap ta-matrix-wrap"><table class="data-table sm ta-matrix"><thead><tr><th>NIP/Nama</th>${MONTHS.map((m,i) => `<th class="${i === 6 ? 'semester-cut' : ''}">${m}</th>`).join('')}<th>Sem I</th><th>Sem II</th><th>Tidak Membuat</th></tr></thead><tbody>${(data.rows || []).map(person => `<tr><td><b>${esc(person.nama || '-')}</b><br><span class="muted">${esc(person.nip)}</span></td>${person.months.map((m,i) => `<td class="${i === 6 ? 'semester-cut' : ''}">${m.predicate ? `<b>${esc(m.predicate.slice(0,12))}</b><br>${pill(m.review_status)}` : '—'}</td>`).join('')}<td>${person.semester_1.approved}/6 disetujui<br>${person.semester_1.low} nilai rendah</td><td>${person.semester_2.approved}/6 disetujui<br>${person.semester_2.low} nilai rendah</td><td>${esc(person.not_submitted_months.join(', ') || '—')}</td></tr>`).join('') || '<tr><td colspan="16">Belum ada data.</td></tr>'}</tbody></table></div>`;
     }
     root.querySelector('#skpAnnualApply').onclick = () => loadAnnual().catch(showError);
+    const streak = await api(`/api/skp-assessment/non-submission-rules?period=${encodeURIComponent(view.period)}`);
+    root.querySelector('#skpStreakConfig').innerHTML = `<div class="table-wrap"><table class="data-table sm"><thead><tr><th>Streak</th><th>Aksi</th><th>Potongan</th><th>Berlaku</th></tr></thead><tbody>${streak.rows.map(row=>`<tr><td>${esc(row.streak_from)}${row.streak_to?`–${esc(row.streak_to)}`:'+'} bulan</td><td>${esc(row.action)}</td><td>${esc(row.reduction_rate)}%</td><td>${esc(row.effective_from)}–${esc(row.effective_to||'seterusnya')}</td></tr>`).join('')}</tbody></table></div>`;
     await loadAnnual();
   }
 
   function bindShell() { if (window.lucide) lucide.createIcons(); }
   async function renderTab(root) {
-    if (view.tab === 'import') importPanel(root);
+    if (view.tab === 'overview') await overviewPanel(root);
+    else if (view.tab === 'import') importPanel(root);
     else if (view.tab === 'configuration') await configurationPanel(root);
     else if (view.tab === 'classification') { listPanel(root, 'classification'); await loadRows(root, false); }
     else if (view.tab === 'review') { listPanel(root, 'review'); await loadRows(root, true); }
@@ -516,6 +573,7 @@
   }
 
   EVKIN.skpAssessmentMod = {
+    selectTab(tab) { view.tab = tab || 'overview'; },
     render(root) { shell(root); bindShell(root); renderTab(root).catch(showError); }
   };
 })();

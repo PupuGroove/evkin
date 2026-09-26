@@ -41,6 +41,23 @@ async function main() {
   const input={raw_import:[{nip:'FIRST'}]};const write=backend.syncWorkflow(input);
   input.raw_import[0].nip='LATER';release();await write;
   assert.equal(requests.at(-1).body.raw_import[0].nip,'FIRST');
+  const chunkRows=Array.from({length:15001},(_,i)=>({nip:String(i),tanggal:'2026-08-01'}));
+  const beforeChunks=requests.length;
+  await backend.syncTableChunks('raw_import',chunkRows,{chunkSize:7500});
+  const chunks=requests.slice(beforeChunks);
+  assert.equal(chunks.length,3);
+  assert.deepEqual(chunks.map(item=>item.body.rows.length),[7500,7500,1]);
+  assert.deepEqual(chunks.map(item=>item.body.replace),[true,false,false]);
+  assert.equal(new Set(chunks.flatMap(item=>item.body.rows.map(row=>row.nip))).size,15001);
+  assert.ok(chunks.every(item=>item.url.endsWith('/api/workflow/sync-table')));
+  const sparse=Array.from({length:5001},(_,i)=>i===5000?{nip:String(i),tanggal:'2026-08-01',Opsional:'X'}:{nip:String(i),tanggal:'2026-08-01'});
+  const sparseStart=requests.length;
+  await backend.syncTableChunks('raw_import',sparse,{chunkSize:5000});
+  const sparseChunks=requests.slice(sparseStart);
+  assert.equal(sparseChunks.length,2);
+  assert.ok(sparseChunks.flatMap(item=>item.body.rows).every(row=>Object.hasOwn(row,'Opsional')),
+    'Every raw chunk must preserve one stable column projection');
+  assert.equal(sparseChunks[0].body.rows[0].Opsional,null);
   console.log('Manifest, atomic Final sync, failure/retry and export validation payload: PASS');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

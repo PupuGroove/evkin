@@ -9,13 +9,14 @@ def payload(period="2026-07", predicate="Baik", **extra):
             "rows": [{"NIP": NIP, "Nama": "ANI UJI", "Predikat": predicate}], **extra}
 
 
-def test_final_import_approved_and_audited_without_configuration(tmp_path):
+def test_final_import_is_distinct_final_source_and_audited_without_configuration(tmp_path):
     _, skp, annual = services(tmp_path)
     result = skp.import_rows(payload(predicate="Kurang"))
     assert result["imported"] == 1
     with annual.connect() as conn:
-        assert conn.execute("SELECT final_predicate,review_status,approved_by FROM skp_assessment_monthly").fetchone() == ("Kurang", "APPROVED", "Petugas Final")
+        assert conn.execute("SELECT final_predicate,review_status,approved_by FROM skp_assessment_monthly").fetchone() == ("Kurang", "FINAL_IMPORTED", None)
         assert conn.execute("SELECT skp_reduction_rate,payment_eligible FROM tukin_skp_monthly").fetchone() == (10, True)
+    assert result["source_type"] == "DIRECT_FINAL_IMPORT" and result["ready_for_tukin"] is True
     assert "IMPORT_FINAL" in str(skp.audit_detail("2026-07", NIP))
 
 

@@ -1,0 +1,58 @@
+{
+  "contract_version": "legacy-js-audit-v1",
+  "config": {
+    "saved": true,
+    "effectiveDaysMode": "manual",
+    "effectiveDaysManual": 1,
+    "holidays": [{"d": "2026-08-17", "n": "Hari Kemerdekaan RI"}],
+    "jamDasar": {
+      "senKam": {"masuk": "07:30", "pulang": "16:00"},
+      "jumat": {"masuk": "07:30", "pulang": "16:30"}
+    },
+    "flexi": {
+      "enabled": true,
+      "masukStart": "07:31",
+      "masukEnd": "08:00",
+      "kompensasiSenKam": "16:30",
+      "kompensasiJumat": "17:00"
+    },
+    "jabatanMaster": [
+      {"nama": "Guru SR", "metode": "reguler"},
+      {"nama": "Wali Asuh", "metode": "durasi"},
+      {"nama": "Wali Asrama", "metode": "durasi"}
+    ],
+    "keterlambatanTiers": [
+      {"max": 30, "pct": 0.5}, {"max": 60, "pct": 1},
+      {"max": 90, "pct": 1.5}, {"max": 120, "pct": 2},
+      {"max": 9999, "pct": 3}
+    ],
+    "pulangCepatTiers": [
+      {"max": 30, "pct": 0.5}, {"max": 60, "pct": 1},
+      {"max": 90, "pct": 1.5}, {"max": 120, "pct": 2},
+      {"max": 9999, "pct": 3}
+    ],
+    "minDurasiJam": 7.5,
+    "potonganTidakLengkap": 3,
+    "potonganHariKurangPerHari": 3,
+    "jenisNoPotongan": ["Cuti Tahunan", "Sakit", "Tugas Kedinasan"],
+    "leavePeriods": []
+  },
+  "cases": [
+    {"id": "normal", "nip": "900001", "date": "2026-08-03", "in": "07:30", "out": "16:00", "job": "Guru SR", "gross": 2000000},
+    {"id": "late_31_minutes", "nip": "900002", "date": "2026-08-04", "in": "08:01", "out": "16:00", "job": "Guru SR", "gross": 2000000},
+    {"id": "missing_in", "nip": "900003", "date": "2026-08-05", "in": null, "out": "16:00", "job": "Guru SR", "gross": 2000000},
+    {"id": "missing_out", "nip": "900004", "date": "2026-08-06", "in": "07:30", "out": null, "job": "Guru SR", "gross": 2000000},
+    {"id": "cross_day_wali", "nip": "900005", "date": "2026-08-07", "in": "20:00", "out": "04:00", "job": "Wali Asuh", "source_format": "wali", "cross_day": true, "gross": 2000000},
+    {"id": "short_wali", "nip": "900006", "date": "2026-08-10", "in": "20:00", "out": "02:00", "job": "Wali Asrama", "source_format": "wali", "cross_day": true, "gross": 2000000},
+    {"id": "holiday_missing", "nip": "900007", "date": "2026-08-17", "in": null, "out": null, "job": "Guru SR", "gross": 2000000},
+    {"id": "weekend_wali", "nip": "900008", "date": "2026-08-02", "in": "20:00", "out": "22:00", "job": "Wali Asuh", "source_format": "wali", "gross": 2000000},
+    {"id": "null_empty", "nip": "900009", "date": "2026-08-11", "in": null, "out": null, "job": "Guru SR", "kind": null, "gross": 2000000},
+    {"id": "flexi_compensated", "nip": "900010", "date": "2026-08-12", "in": "07:45", "out": "16:31", "job": "Guru SR", "gross": 2000000},
+    {"id": "timezone_wita", "nip": "900011", "date": "2026-08-13", "in": "08:00", "out": "17:00", "job": "Guru SR", "zone": "WITA", "time_mode": "wib", "gross": 2000000},
+    {"id": "free_kind", "nip": "900012", "date": "2026-08-14", "in": null, "out": null, "job": "Guru SR", "kind": "Cuti Tahunan", "gross": 2000000},
+    {"id": "duplicate", "nip": "900013", "date": "2026-08-18", "in": "07:30", "out": "16:00", "job": "Guru SR", "duplicate": true, "gross": 2000000},
+    {"id": "rounding_rupiah", "nip": "900014", "date": "2026-08-19", "in": "07:30", "out": "16:00", "job": "Guru SR", "gross": 1000002, "final_attendance_rate": 50, "skp_rate": 50, "skp_status": "APPROVED"},
+    {"id": "skp_approved", "nip": "900015", "date": "2026-08-20", "in": "07:30", "out": "16:00", "job": "Guru SR", "gross": 10000000, "final_attendance_rate": 20, "skp_rate": 10, "skp_status": "APPROVED"},
+    {"id": "skp_not_final", "nip": "900016", "date": "2026-08-21", "in": "07:30", "out": "16:30", "job": "Guru SR", "gross": 10000000, "final_attendance_rate": 20, "skp_rate": 10, "skp_status": "DRAFT"}
+  ]
+}
